@@ -3,15 +3,21 @@ CV-KAN: Full model for sequence classification.
 
 Architecture:
 - Input embedding → complex projection
-- Stack of PolarizingBlocks with ComplexLayerNorm
+- Stack of PolarizingBlocks (no normalization - magnitudes encode attention)
+- Log-magnitude centering to prevent drift
 - Global pooling → classifier head
+
+Note: Traditional normalization (LayerNorm, RMSNorm) is intentionally NOT used
+because magnitudes in CV-KAN encode attention-like information. Normalizing
+would destroy this signal. Instead, we use log-magnitude centering which
+preserves relative magnitudes while preventing absolute scale drift.
 """
 
 import torch
 import torch.nn as nn
-from typing import Literal, Optional
+from typing import Literal
 
-from ..modules import PolarizingBlock, ComplexLayerNorm, ComplexRMSNorm
+from ..modules import PolarizingBlock
 from ..modules.multi_head import (
     EmergentHeadsPolarizing,
     PhaseOffsetPolarizing,
@@ -93,6 +99,10 @@ class CVKAN(nn.Module):
     """
     Complete CV-KAN model for sequence classification.
     
+    This architecture uses complex-valued representations where magnitudes
+    encode attention-like information ("polarization"). Traditional normalization
+    is NOT used because it would destroy the magnitude signal.
+    
     Args:
         d_input: Input dimension (real if input_type='real', complex if 'complex')
         d_complex: Complex representation dimension
@@ -104,7 +114,7 @@ class CVKAN(nn.Module):
         input_type: 'real' or 'complex'
         pooling: 'mean', 'max', or 'first'
         block_type: 'polarizing' or 'attention'
-        norm_type: 'layer' or 'rms'
+        center_magnitudes: Whether to center log-magnitudes to prevent drift
     """
     
     def __init__(
@@ -119,7 +129,7 @@ class CVKAN(nn.Module):
         input_type: Literal['real', 'complex'] = 'complex',
         pooling: Literal['mean', 'max', 'first'] = 'mean',
         block_type: Literal['polarizing', 'attention'] = 'polarizing',
-        norm_type: Literal['layer', 'rms', 'none'] = 'none',
+        center_magnitudes: bool = True,
     ):
         super().__init__()
         self.d_complex = d_complex
@@ -127,6 +137,7 @@ class CVKAN(nn.Module):
         self.pooling = pooling
         self.head_approach = head_approach
         self.block_type = block_type
+        self.center_magnitudes = center_magnitudes
         
         # Input embedding
         if input_type == 'real':
@@ -134,9 +145,8 @@ class CVKAN(nn.Module):
         else:
             self.embedding = ComplexInputEmbedding(d_input, d_complex)
         
-        # Build layers based on approach
+        # Build layers based on approach (no normalization layers)
         self.layers = nn.ModuleList()
-        self.norms = nn.ModuleList()
         
         for _ in range(n_layers):
             # Select Block Type
@@ -157,16 +167,6 @@ class CVKAN(nn.Module):
                  raise ValueError(f"Unknown block type: {block_type}")
             
             self.layers.append(layer)
-            
-            # Select Norm Type
-            if norm_type == 'layer':
-                self.norms.append(ComplexLayerNorm(d_complex))
-            elif norm_type == 'rms':
-                self.norms.append(ComplexRMSNorm(d_complex))
-            elif norm_type == 'none':
-                self.norms.append(nn.Identity())
-            else:
-                raise ValueError(f"Unknown norm type: {norm_type}")
         
         # Classification head (operates on magnitude)
         self.classifier = nn.Sequential(
@@ -174,6 +174,29 @@ class CVKAN(nn.Module):
             nn.GELU(),
             nn.Linear(kan_hidden, n_classes),
         )
+    
+    def _center_log_magnitudes(self, Z: torch.Tensor) -> torch.Tensor:
+        """
+        Center log-magnitudes across tokens to prevent drift.
+        
+        This is the CV-KAN alternative to normalization. It preserves:
+        - Relative magnitudes between tokens (the "attention" signal)
+        - Per-dimension magnitude specialization
+        
+        While preventing:
+        - Exponential magnitude growth/collapse over many layers
+        
+        Args:
+            Z: Complex tensor of shape (batch, n_tokens, d_complex)
+        
+        Returns:
+            Complex tensor with centered log-magnitudes
+        """
+        log_mags = torch.log(torch.abs(Z) + 1e-6)
+        # Center across tokens (dim=1), not dimensions
+        log_mags_centered = log_mags - log_mags.mean(dim=1, keepdim=True)
+        # Reconstruct: exp(centered log-mag) * unit phase
+        return torch.exp(log_mags_centered) * torch.exp(1j * torch.angle(Z))
     
     def forward(
         self,
@@ -202,12 +225,15 @@ class CVKAN(nn.Module):
         if return_intermediates:
             intermediates.append(Z.clone())
         
-        # Apply polarizing layers
-        for layer, norm in zip(self.layers, self.norms):
+        # Apply polarizing layers (no normalization)
+        for layer in self.layers:
             Z = layer(Z, mask=mask)
-            Z = norm(Z)
             if return_intermediates:
                 intermediates.append(Z.clone())
+        
+        # Center log-magnitudes to prevent drift while preserving relative magnitudes
+        if self.center_magnitudes:
+            Z = self._center_log_magnitudes(Z)
         
         # Pool across tokens
         if self.pooling == 'mean':
@@ -309,12 +335,15 @@ class CVKANTokenClassifier(CVKAN):
         if return_intermediates:
             intermediates.append(Z.clone())
         
-        # Apply layers
-        for layer, norm in zip(self.layers, self.norms):
+        # Apply layers (no normalization)
+        for layer in self.layers:
             Z = layer(Z, mask=mask)
-            Z = norm(Z)
             if return_intermediates:
                 intermediates.append(Z.clone())
+        
+        # Center log-magnitudes to prevent drift
+        if self.center_magnitudes:
+            Z = self._center_log_magnitudes(Z)
         
         # Per-token classification (on magnitudes)
         token_features = torch.abs(Z)  # (batch, n_tokens, d)

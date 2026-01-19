@@ -1,5 +1,9 @@
 """
 Unit tests for CV-KAN modules.
+
+Note: ComplexLayerNorm and ComplexRMSNorm tests have been removed because
+CV-KAN intentionally does not use traditional normalization (magnitudes
+encode attention-like information). Log-magnitude centering is used instead.
 """
 
 import pytest
@@ -12,8 +16,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.modules import (
     PolarizingBlock,
-    ComplexLayerNorm,
-    ComplexRMSNorm,
     GatedPolarization,
     PhaseAttentionBlock,
 )
@@ -61,32 +63,6 @@ class TestPolarizingBlock:
         assert Z.grad is not None
         assert not torch.isnan(Z.grad).any()
 
-
-class TestComplexLayerNorm:
-    """Tests for ComplexLayerNorm."""
-    
-    def test_normalization(self):
-        """Log-magnitudes should be normalized."""
-        norm = ComplexLayerNorm(d_complex=32)
-        Z = torch.randn(4, 16, 32, dtype=torch.cfloat) * 10  # Large values
-        out = norm(Z)
-        
-        # Check output magnitudes are more reasonable
-        log_mag_out = torch.log(torch.abs(out) + 1e-6)
-        assert log_mag_out.std() < 5  # Roughly normalized
-    
-    def test_phase_preservation(self):
-        """Phases should be approximately preserved."""
-        norm = ComplexLayerNorm(d_complex=32)
-        Z = torch.randn(4, 16, 32, dtype=torch.cfloat)
-        out = norm(Z)
-        
-        phase_in = torch.angle(Z)
-        phase_out = torch.angle(out)
-        
-        # Phases should match (up to numerical precision)
-        phase_diff = torch.abs(torch.exp(1j * phase_in) - torch.exp(1j * phase_out))
-        assert phase_diff.mean() < 0.01
 
 
 class TestGatedPolarization:
@@ -260,32 +236,6 @@ class TestLosses:
         # Anchored should have lower loss
         assert loss_anchored < loss_random
 
-
-class TestComplexRMSNorm:
-    """Tests for ComplexRMSNorm."""
-    
-    def test_normalization(self):
-        """RMS of magnitudes should be normalized."""
-        norm = ComplexRMSNorm(d_complex=32)
-        Z = torch.randn(4, 16, 32, dtype=torch.cfloat) * 10
-        out = norm(Z)
-        
-        # Check rms is approx 1
-        mag_sq = torch.abs(out) ** 2
-        rms = torch.sqrt(mag_sq.mean(dim=-1))
-        assert torch.abs(rms - 1.0).mean() < 0.1
-    
-    def test_phase_preservation(self):
-        """Phases should be preserved."""
-        norm = ComplexRMSNorm(d_complex=32)
-        Z = torch.randn(4, 16, 32, dtype=torch.cfloat)
-        out = norm(Z)
-        
-        phase_in = torch.angle(Z)
-        phase_out = torch.angle(out)
-        
-        phase_diff = torch.abs(torch.exp(1j * phase_in) - torch.exp(1j * phase_out))
-        assert phase_diff.mean() < 0.01
 
 
 class TestPhaseAttentionBlock:
