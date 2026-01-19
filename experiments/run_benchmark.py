@@ -35,6 +35,8 @@ class ExperimentConfig:
     n_layers: int
     seed: int
     epochs: int
+    patience: int = 10
+    amp: bool = False
     subset_size: Optional[int] = None
     extra_args: Optional[Dict[str, Any]] = None
     
@@ -66,6 +68,7 @@ class BenchmarkRunner:
     DOMAIN_CONFIGS = {
         'image': {
             'epochs': 50,
+            'patience': 10,
             'script': 'experiments/train_image.py',
             'baseline_script': 'experiments/baselines/vit_baseline.py',
             'pilot_epochs': 5,
@@ -74,6 +77,7 @@ class BenchmarkRunner:
         },
         'timeseries': {
             'epochs': 30,
+            'patience': 10,
             'script': 'experiments/train_timeseries.py', 
             'baseline_script': 'experiments/baselines/lstm_baseline.py',
             'pilot_epochs': 3,
@@ -82,6 +86,7 @@ class BenchmarkRunner:
         },
         'audio': {
             'epochs': 20,
+            'patience': 10,
             'script': 'experiments/train_audio.py',
             'baseline_script': 'experiments/baselines/cnn_audio_baseline.py',
             'pilot_epochs': 2,
@@ -90,10 +95,11 @@ class BenchmarkRunner:
         },
     }
     
-    def __init__(self, output_dir: str = 'outputs/benchmark', pilot: bool = False):
+    def __init__(self, output_dir: str = 'outputs/benchmark', pilot: bool = False, amp: bool = True):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.pilot = pilot
+        self.amp = amp
         self.results: List[ExperimentResult] = []
         self.checkpoint_path = self.output_dir / 'checkpoint.json'
         self.completed_runs: set = set()
@@ -114,6 +120,7 @@ class BenchmarkRunner:
         for domain in domains:
             domain_cfg = self.DOMAIN_CONFIGS[domain]
             epochs = domain_cfg['pilot_epochs'] if self.pilot else domain_cfg['epochs']
+            patience = domain_cfg['patience']
             subset = domain_cfg['pilot_subset'] if self.pilot else None
             
             for model_type in model_types:
@@ -129,6 +136,8 @@ class BenchmarkRunner:
                                 n_layers=n_layers,
                                 seed=seed,
                                 epochs=epochs,
+                                patience=patience,
+                                amp=self.amp,
                                 subset_size=subset,
                             ))
         
@@ -147,12 +156,16 @@ class BenchmarkRunner:
         cmd = [
             sys.executable, script,
             '--epochs', str(config.epochs),
+            '--patience', str(config.patience),
             '--d_complex', str(config.d_complex),
             '--n_layers', str(config.n_layers),
             '--seed', str(config.seed),
             '--run_name', config.run_name,
             '--output_dir', str(self.output_dir / config.domain),
         ]
+        
+        if config.amp:
+            cmd.append('--amp')
         
         if config.subset_size:
             cmd.extend(['--subset_size', str(config.subset_size)])
@@ -380,12 +393,14 @@ def main():
     parser.add_argument('--domains', type=str, nargs='+', 
                         choices=['image', 'timeseries', 'audio'],
                         help='Specific domains to run (default: all)')
+    parser.add_argument('--amp', action='store_true', help='Enable Automatic Mixed Precision (default: False)')
     
     args = parser.parse_args()
     
     runner = BenchmarkRunner(
         output_dir=args.output_dir,
         pilot=args.pilot,
+        amp=args.amp,
     )
     
     runner.run_all(domains=args.domains, resume=args.resume)

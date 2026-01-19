@@ -2,7 +2,7 @@
 Training script for CV-KAN Time Series Forecasting on ETTh1.
 
 Usage:
-    python experiments/train_timeseries.py --epochs 50 --d_complex 64
+    python experiments/train_timeseries.py --epochs 50 --d_complex 64 --patience 10 --amp
 """
 
 import argparse
@@ -18,7 +18,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from tqdm import tqdm
 import numpy as np
 
 # Add src to path
@@ -26,6 +25,51 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.data import create_timeseries_dataloader
 from src.models.cv_kan_timeseries import CVKANTimeSeries
+from src.trainer import BaseTrainer
+
+
+class TimeSeriesTrainer(BaseTrainer):
+    def train_step(self, batch):
+        seq_x, seq_y = batch
+        seq_x = seq_x.to(self.device)
+        seq_y = seq_y.to(self.device)
+        
+        # seq_y contains [label_len + pred_len] timesteps
+        # We predict the last pred_len timesteps
+        pred_len = self.args.pred_len
+        target = seq_y[:, -pred_len:, :]
+        
+        outputs = self.model(seq_x, return_sequence=False)
+        predictions = outputs['predictions']  # (batch, pred_len, output_dim)
+        
+        loss = F.mse_loss(predictions, target)
+        mae = F.l1_loss(predictions, target)
+        
+        return {
+            'loss': loss,
+            'mse': loss, # Same as loss for this task
+            'mae': mae
+        }
+
+    def validate_step(self, batch):
+        seq_x, seq_y = batch
+        seq_x = seq_x.to(self.device)
+        seq_y = seq_y.to(self.device)
+        
+        pred_len = self.args.pred_len
+        target = seq_y[:, -pred_len:, :]
+        
+        outputs = self.model(seq_x, return_sequence=False)
+        predictions = outputs['predictions']
+        
+        loss = F.mse_loss(predictions, target)
+        mae = F.l1_loss(predictions, target)
+        
+        return {
+            'loss': loss,
+            'mse': loss,
+            'mae': mae
+        }
 
 
 def parse_args():
@@ -51,6 +95,10 @@ def parse_args():
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--weight_decay', type=float, default=0.01)
     
+    # New args
+    parser.add_argument('--patience', type=int, default=10, help='Early stopping patience')
+    parser.add_argument('--amp', action='store_true', help='Use Automatic Mixed Precision')
+    
     # Output
     parser.add_argument('--output_dir', type=str, default='outputs/timeseries')
     parser.add_argument('--run_name', type=str, default=None)
@@ -59,7 +107,9 @@ def parse_args():
     # Reproducibility
     parser.add_argument('--seed', type=int, default=42)
     
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.metric_mode = 'min' # For MSE, lower is better
+    return args
 
 
 def set_seed(seed):
@@ -70,81 +120,6 @@ def set_seed(seed):
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-
-def train_epoch(model, dataloader, optimizer, device, epoch, pred_len):
-    model.train()
-    total_loss = 0
-    total_mse = 0
-    total_mae = 0
-    n_batches = 0
-    
-    pbar = tqdm(dataloader, desc=f'Train Epoch {epoch}')
-    for seq_x, seq_y in pbar:
-        seq_x = seq_x.to(device)
-        seq_y = seq_y.to(device)
-        
-        # seq_y contains [label_len + pred_len] timesteps
-        # We predict the last pred_len timesteps
-        target = seq_y[:, -pred_len:, :]
-        
-        optimizer.zero_grad()
-        
-        outputs = model(seq_x, return_sequence=False)
-        predictions = outputs['predictions']  # (batch, pred_len, output_dim)
-        
-        loss = F.mse_loss(predictions, target)
-        loss.backward()
-        
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-        
-        total_loss += loss.item()
-        total_mse += F.mse_loss(predictions, target, reduction='sum').item()
-        total_mae += F.l1_loss(predictions, target, reduction='sum').item()
-        n_batches += 1
-        
-        pbar.set_postfix({'loss': f'{loss.item():.4f}'})
-    
-    n_samples = n_batches * dataloader.batch_size * pred_len * target.shape[-1]
-    
-    return {
-        'loss': total_loss / n_batches,
-        'mse': total_mse / n_samples,
-        'mae': total_mae / n_samples,
-    }
-
-
-@torch.no_grad()
-def evaluate(model, dataloader, device, pred_len):
-    model.eval()
-    total_loss = 0
-    total_mse = 0
-    total_mae = 0
-    n_batches = 0
-    
-    for seq_x, seq_y in dataloader:
-        seq_x = seq_x.to(device)
-        seq_y = seq_y.to(device)
-        
-        target = seq_y[:, -pred_len:, :]
-        
-        outputs = model(seq_x, return_sequence=False)
-        predictions = outputs['predictions']
-        
-        loss = F.mse_loss(predictions, target)
-        total_loss += loss.item()
-        total_mse += F.mse_loss(predictions, target, reduction='sum').item()
-        total_mae += F.l1_loss(predictions, target, reduction='sum').item()
-        n_batches += 1
-    
-    n_samples = n_batches * dataloader.batch_size * pred_len * target.shape[-1]
-    
-    return {
-        'loss': total_loss / n_batches,
-        'mse': total_mse / n_samples,
-        'mae': total_mae / n_samples,
-    }
 
 
 def main():
@@ -195,66 +170,37 @@ def main():
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
     
-    # Training loop
-    print("Starting training...")
-    history = []
-    best_val_mse = float('inf')
-    start_time = time.time()
+    # Trainer
+    trainer = TimeSeriesTrainer(
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        device=device,
+        output_dir=output_dir,
+        args=args,
+        use_amp=args.amp
+    )
     
-    for epoch in range(1, args.epochs + 1):
-        epoch_start = time.time()
-        
-        train_results = train_epoch(model, train_loader, optimizer, device, epoch, args.pred_len)
-        val_results = evaluate(model, val_loader, device, args.pred_len)
-        
-        scheduler.step()
-        epoch_time = time.time() - epoch_start
-        
-        print(f"Epoch {epoch}/{args.epochs} ({epoch_time:.1f}s) - "
-              f"Train MSE: {train_results['mse']:.6f}, MAE: {train_results['mae']:.6f} - "
-              f"Val MSE: {val_results['mse']:.6f}, MAE: {val_results['mae']:.6f}")
-        
-        history.append({
-            'epoch': epoch,
-            'train': train_results,
-            'val': val_results,
-            'lr': optimizer.param_groups[0]['lr'],
-            'epoch_time': epoch_time,
-        })
-        
-        # Save best
-        if val_results['mse'] < best_val_mse:
-            best_val_mse = val_results['mse']
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'val_mse': val_results['mse'],
-                'args': vars(args),
-            }, output_dir / 'best.pt')
-            print(f"  -> Saved best model (val MSE: {val_results['mse']:.6f})")
-        
-        # Periodic save
-        if epoch % args.save_every == 0:
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'history': history,
-            }, output_dir / f'checkpoint_{epoch}.pt')
+    # Training
+    history, total_time = trainer.fit(
+        train_loader=train_loader,
+        val_loader=val_loader,
+        epochs=args.epochs,
+        patience=args.patience,
+        metric_name='mse'
+    )
     
     # Final evaluation on test set
     print("\nEvaluating on test set...")
-    test_results = evaluate(model, test_loader, device, args.pred_len)
+    test_results = trainer.evaluate(test_loader)
     print(f"Test MSE: {test_results['mse']:.6f}, MAE: {test_results['mae']:.6f}")
-    
-    total_time = time.time() - start_time
     
     # Save final results
     results = {
         'model': 'CVKANTimeSeries',
         'dataset': 'ETTh1',
         'n_params': n_params,
-        'best_val_mse': best_val_mse,
+        'best_val_mse': trainer.best_val_metric,
         'test_mse': test_results['mse'],
         'test_mae': test_results['mae'],
         'total_time_seconds': total_time,
@@ -267,7 +213,7 @@ def main():
         json.dump(results, f, indent=2)
     
     print(f"\nTraining complete! Total time: {total_time/3600:.2f} hours")
-    print(f"Best val MSE: {best_val_mse:.6f}, Test MSE: {test_results['mse']:.6f}")
+    print(f"Best val MSE: {trainer.best_val_metric:.6f}, Test MSE: {test_results['mse']:.6f}")
     print(f"Results saved to {output_dir}")
     
     return results

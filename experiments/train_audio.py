@@ -2,7 +2,7 @@
 Training script for CV-KAN Audio Classification on Speech Commands.
 
 Usage:
-    python experiments/train_audio.py --epochs 30 --d_complex 128
+    python experiments/train_audio.py --epochs 30 --d_complex 128 --patience 10 --amp
 """
 
 import argparse
@@ -18,7 +18,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from tqdm import tqdm
 import numpy as np
 
 # Add src to path
@@ -26,6 +25,50 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.data import create_audio_dataloader, TORCHAUDIO_AVAILABLE
 from src.models.cv_kan_audio import CVKANAudio
+from src.trainer import BaseTrainer
+
+
+class AudioTrainer(BaseTrainer):
+    def train_step(self, batch):
+        waveforms, labels = batch
+        # waveforms: (batch, 1, samples)
+        waveforms = waveforms.squeeze(1).to(self.device)  # (batch, samples)
+        labels = labels.to(self.device)
+        
+        outputs = self.model(waveforms)
+        logits = outputs['logits']
+        
+        loss = F.cross_entropy(logits, labels)
+        
+        _, predicted = logits.max(1)
+        total = labels.size(0)
+        correct = predicted.eq(labels).sum().item()
+        accuracy = 100. * correct / total
+        
+        return {
+            'loss': loss,
+            'accuracy': accuracy
+        }
+
+    def validate_step(self, batch):
+        waveforms, labels = batch
+        waveforms = waveforms.squeeze(1).to(self.device)
+        labels = labels.to(self.device)
+        
+        outputs = self.model(waveforms)
+        logits = outputs['logits']
+        
+        loss = F.cross_entropy(logits, labels)
+        
+        _, predicted = logits.max(1)
+        total = labels.size(0)
+        correct = predicted.eq(labels).sum().item()
+        accuracy = 100. * correct / total
+        
+        return {
+            'loss': loss,
+            'accuracy': accuracy
+        }
 
 
 def parse_args():
@@ -49,6 +92,10 @@ def parse_args():
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--weight_decay', type=float, default=0.01)
     
+    # New args
+    parser.add_argument('--patience', type=int, default=10, help='Early stopping patience')
+    parser.add_argument('--amp', action='store_true', help='Use Automatic Mixed Precision')
+    
     # Output
     parser.add_argument('--output_dir', type=str, default='outputs/audio')
     parser.add_argument('--run_name', type=str, default=None)
@@ -57,7 +104,9 @@ def parse_args():
     # Reproducibility
     parser.add_argument('--seed', type=int, default=42)
     
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.metric_mode = 'max' # For accuracy, higher is better
+    return args
 
 
 def set_seed(seed):
@@ -68,72 +117,6 @@ def set_seed(seed):
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-
-def train_epoch(model, dataloader, optimizer, device, epoch):
-    model.train()
-    total_loss = 0
-    correct = 0
-    total = 0
-    
-    pbar = tqdm(dataloader, desc=f'Train Epoch {epoch}')
-    for waveforms, labels in pbar:
-        # waveforms: (batch, 1, samples)
-        waveforms = waveforms.squeeze(1).to(device)  # (batch, samples)
-        labels = labels.to(device)
-        
-        optimizer.zero_grad()
-        
-        outputs = model(waveforms)
-        logits = outputs['logits']
-        
-        loss = F.cross_entropy(logits, labels)
-        loss.backward()
-        
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-        
-        total_loss += loss.item()
-        _, predicted = logits.max(1)
-        total += labels.size(0)
-        correct += predicted.eq(labels).sum().item()
-        
-        pbar.set_postfix({
-            'loss': f'{loss.item():.4f}',
-            'acc': f'{100.*correct/total:.2f}%'
-        })
-    
-    return {
-        'loss': total_loss / len(dataloader),
-        'accuracy': 100. * correct / total
-    }
-
-
-@torch.no_grad()
-def evaluate(model, dataloader, device):
-    model.eval()
-    total_loss = 0
-    correct = 0
-    total = 0
-    
-    for waveforms, labels in dataloader:
-        waveforms = waveforms.squeeze(1).to(device)
-        labels = labels.to(device)
-        
-        outputs = model(waveforms)
-        logits = outputs['logits']
-        
-        loss = F.cross_entropy(logits, labels)
-        total_loss += loss.item()
-        
-        _, predicted = logits.max(1)
-        total += labels.size(0)
-        correct += predicted.eq(labels).sum().item()
-    
-    return {
-        'loss': total_loss / len(dataloader),
-        'accuracy': 100. * correct / total
-    }
 
 
 def main():
@@ -194,66 +177,37 @@ def main():
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
     
-    # Training loop
-    print("Starting training...")
-    history = []
-    best_val_acc = 0
-    start_time = time.time()
+    # Trainer
+    trainer = AudioTrainer(
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        device=device,
+        output_dir=output_dir,
+        args=args,
+        use_amp=args.amp
+    )
     
-    for epoch in range(1, args.epochs + 1):
-        epoch_start = time.time()
-        
-        train_results = train_epoch(model, train_loader, optimizer, device, epoch)
-        val_results = evaluate(model, val_loader, device)
-        
-        scheduler.step()
-        epoch_time = time.time() - epoch_start
-        
-        print(f"Epoch {epoch}/{args.epochs} ({epoch_time:.1f}s) - "
-              f"Train Loss: {train_results['loss']:.4f}, Train Acc: {train_results['accuracy']:.2f}% - "
-              f"Val Loss: {val_results['loss']:.4f}, Val Acc: {val_results['accuracy']:.2f}%")
-        
-        history.append({
-            'epoch': epoch,
-            'train': train_results,
-            'val': val_results,
-            'lr': optimizer.param_groups[0]['lr'],
-            'epoch_time': epoch_time,
-        })
-        
-        # Save best
-        if val_results['accuracy'] > best_val_acc:
-            best_val_acc = val_results['accuracy']
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'val_acc': val_results['accuracy'],
-                'args': vars(args),
-            }, output_dir / 'best.pt')
-            print(f"  -> Saved best model (val acc: {val_results['accuracy']:.2f}%)")
-        
-        # Periodic save
-        if epoch % args.save_every == 0:
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'history': history,
-            }, output_dir / f'checkpoint_{epoch}.pt')
+    # Training
+    history, total_time = trainer.fit(
+        train_loader=train_loader,
+        val_loader=val_loader,
+        epochs=args.epochs,
+        patience=args.patience,
+        metric_name='accuracy'
+    )
     
     # Final evaluation on test set
     print("\nEvaluating on test set...")
-    test_results = evaluate(model, test_loader, device)
+    test_results = trainer.evaluate(test_loader)
     print(f"Test Accuracy: {test_results['accuracy']:.2f}%")
-    
-    total_time = time.time() - start_time
     
     # Save final results
     results = {
         'model': 'CVKANAudio',
         'dataset': 'SpeechCommands',
         'n_params': n_params,
-        'best_val_acc': best_val_acc,
+        'best_val_acc': trainer.best_val_metric,
         'test_acc': test_results['accuracy'],
         'test_loss': test_results['loss'],
         'total_time_seconds': total_time,
@@ -266,7 +220,7 @@ def main():
         json.dump(results, f, indent=2)
     
     print(f"\nTraining complete! Total time: {total_time/3600:.2f} hours")
-    print(f"Best val acc: {best_val_acc:.2f}%, Test acc: {test_results['accuracy']:.2f}%")
+    print(f"Best val acc: {trainer.best_val_metric:.2f}%, Test acc: {test_results['accuracy']:.2f}%")
     print(f"Results saved to {output_dir}")
     
     return results
