@@ -3,7 +3,7 @@ import torch
 import sys
 sys.path.insert(0, '.')
 
-from src.modules import PolarizingBlock, ComplexLayerNorm, GatedPolarization
+from src.modules import PolarizingBlock, GatedPolarization
 from src.modules.multi_head import (
     EmergentHeadsPolarizing, 
     PhaseOffsetPolarizing, 
@@ -21,11 +21,6 @@ Z = torch.randn(4, 16, 32, dtype=torch.cfloat)
 block = PolarizingBlock(32)
 out = block(Z)
 print(f"PolarizingBlock: {Z.shape} -> {out.shape}")
-
-# Test ComplexLayerNorm
-norm = ComplexLayerNorm(32)
-out_norm = norm(Z)
-print(f"ComplexLayerNorm: {Z.shape} -> {out_norm.shape}")
 
 # Test multi-head approaches
 emergent = EmergentHeadsPolarizing(64)

@@ -13,13 +13,36 @@ from .multi_head import (
     PhaseOffsetPolarizing,
     FactoredHeadsPolarizing,
 )
+from .aggregation import (
+    GlobalMeanAggregation,
+    LocalWindowAggregation,
+    CausalAggregation,
+    NeighborhoodAggregation,
+)
+from .positional_encoding import (
+    ComplexPositionalEncoding,
+    Complex2DPositionalEncoding,
+    LearnableComplexPositionalEncoding,
+    Learnable2DComplexPositionalEncoding,
+)
 
 __all__ = [
+    # Core blocks
     "PolarizingBlock",
     "GatedPolarization",
     "PhaseAttentionBlock",
+    # Multi-head variants
     "EmergentHeadsPolarizing",
     "PhaseOffsetPolarizing",
     "FactoredHeadsPolarizing",
+    # Aggregation strategies
+    "GlobalMeanAggregation",
+    "LocalWindowAggregation",
+    "CausalAggregation",
+    "NeighborhoodAggregation",
+    # Positional encodings
+    "ComplexPositionalEncoding",
+    "Complex2DPositionalEncoding",
+    "LearnableComplexPositionalEncoding",
+    "Learnable2DComplexPositionalEncoding",
 ]
-

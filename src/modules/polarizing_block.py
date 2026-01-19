@@ -11,6 +11,9 @@ This module implements the fundamental operation:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Optional
+
+from .aggregation import GlobalMeanAggregation
 
 
 class PolarizingBlock(nn.Module):
@@ -22,6 +25,8 @@ class PolarizingBlock(nn.Module):
         d_complex: Number of complex dimensions
         kan_hidden: Hidden size for the KAN approximation MLPs
         mag_init_scale: Initial scale for magnitude transform (small = stable)
+        aggregation: Custom aggregation strategy (default: GlobalMeanAggregation).
+                     Must be an nn.Module with forward(Z, mask) -> aggregated tensor.
     """
     
     def __init__(
@@ -29,9 +34,13 @@ class PolarizingBlock(nn.Module):
         d_complex: int,
         kan_hidden: int = 32,
         mag_init_scale: float = 0.1,
+        aggregation: Optional[nn.Module] = None,
     ):
         super().__init__()
         self.d_complex = d_complex
+        
+        # Aggregation strategy (default: global mean)
+        self.aggregation = aggregation if aggregation is not None else GlobalMeanAggregation()
         
         # Learnable 1D functions (small MLPs as KAN approximation)
         # Magnitude transform: log(|z|) -> log(|z'|)
@@ -74,15 +83,8 @@ class PolarizingBlock(nn.Module):
         Returns:
             Complex tensor of same shape with polarizing interaction applied
         """
-        # Aggregate: mean is bounded regardless of sequence length
-        if mask is not None:
-            # Masked mean
-            mask_expanded = mask.unsqueeze(-1).float()  # (batch, n_tokens, 1)
-            sum_Z = (Z * mask_expanded).sum(dim=1, keepdim=True)
-            count = mask_expanded.sum(dim=1, keepdim=True).clamp(min=1.0)
-            A = sum_Z / count
-        else:
-            A = Z.mean(dim=1, keepdim=True)  # (batch, 1, d_complex)
+        # Use the aggregation strategy
+        A = self.aggregation(Z, mask)
         
         # Decompose to polar coordinates
 
@@ -111,6 +113,10 @@ class PolarizingBlock(nn.Module):
         # Broadcast interaction back to all tokens (residual connection)
         return Z + A_new
     
-    def get_aggregate(self, Z: torch.Tensor) -> torch.Tensor:
+    def get_aggregate(self, Z: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
         """Get the aggregate representation (useful for diagnostics)."""
-        return Z.mean(dim=1)
+        A = self.aggregation(Z, mask)
+        # If returned as (batch, 1, d), squeeze to (batch, d)
+        if A.dim() == 3 and A.shape[1] == 1:
+            return A.squeeze(1)
+        return A
