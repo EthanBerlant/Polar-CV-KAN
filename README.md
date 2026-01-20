@@ -9,7 +9,6 @@ This architecture introduces a novel attention mechanism where tokens interact t
 ## Key Features
 
 - **PolarizingBlock**: The core unit that aggregates tokens, decomposes them into polar coordinates (log-magnitude and phase), applies learnable 1D transformations (KAN-style), and recomposes them.
-- **Complex Normalization**: `ComplexLayerNorm` and `ComplexRMSNorm` to stabilize deep complex-valued networks.
 - **Multi-Head Approaches**:
   - `EmergentHeads`: Implicit heads via dimension specialization (best performing).
   - `PhaseOffset`: Explicit fixed phase rotations.
@@ -32,7 +31,7 @@ pip install -e ".[dev]"
 
 ```
 src/
-  modules/       # Core layers (PolarizingBlock, ComplexNorm, etc.)
+  modules/       # Core layers (PolarizingBlock, multi-head variants, aggregation)
   models/        # CVKAN model definitions
   data/          # Data loaders (Synthetic, SST-2)
   losses/        # Regularization terms

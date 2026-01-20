@@ -47,7 +47,7 @@ Create `experiments/arg_parser.py` to deduplicate `parse_args` in:
 
 ## Execution Order
 1.  [x] Write experiment log (`docs/experiments/image_optimization_log.md`)
-2.  [ ] Create `experiments/arg_parser.py` and refactor defined scripts.
+2.  [x] Create `experiments/arg_parser.py` and refactor defined scripts.
 3.  [ ] Update `CVKANAudio` (add AttentionPooling).
 4.  [ ] Update `run_benchmark.py`.
-5.  [ ] Create and launch `overnight_benchmark.ps1`.
+5.  [x] Create and launch `overnight_benchmark.ps1`.

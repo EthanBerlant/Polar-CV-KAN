@@ -7,14 +7,28 @@ The primary goal is to demonstrate that CV-KAN's **phase-based mechanics** and *
 
 ## General Methodology
 
-### Parameter Budget Constraint
-All comparisons will be **parameter-matched**. We will tune the `d_complex`, `kan_hidden`, and `n_layers` of the CV-KAN models to match the parameter count of the chosen baselines within ±10%.
+### Comparison Philosophy
+
+We support two complementary comparison modes:
+
+1. **Parameter-matched**: Tune CV-KAN (`d_complex`, `kan_hidden`, `n_layers`) to match baseline parameter count within ±10%. Answers: *"Given equal capacity, which architecture performs better?"*
+
+2. **Accuracy-matched**: Find the minimum CV-KAN configuration that matches baseline accuracy. Answers: *"How much more/less capacity does CV-KAN need to achieve equivalent performance?"*
+
+Both modes provide meaningful insights—parameter-matching tests raw efficiency, while accuracy-matching reveals architectural overhead.
 
 ### Training Protocol
-- **Optimizer**: AdamW for all models.
+- **Optimizer**: AdamW for all models (SGD fails to converge on complex-valued networks).
 - **Scheduler**: Cosine Annealing with Warmup.
+- **Precision**: FP32 only (see Known Issues).
 - **Hardware**: Single GPU (typical consumer/research grade).
 - **Repetitions**: 3 runs per configuration (mean ± std dev).
+
+### Known Issues
+
+> [!WARNING]
+> **AMP Not Supported**: Automatic Mixed Precision causes NaN gradients with complex-valued tensors. PyTorch's `ComplexHalf` support appears insufficient for magnitude calculations. This is a known limitation pending future investigation (bfloat16, selective AMP).
+
 
 ---
 

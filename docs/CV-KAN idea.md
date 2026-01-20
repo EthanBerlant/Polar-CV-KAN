@@ -147,6 +147,9 @@ class FactoredHeads(nn.Module):
 
 ### Phase 3: Stability Mechanisms
 
+> [!NOTE]
+> **Post-experiment findings**: Magnitude normalization was found to **directly contradict** the polarization mechanism—normalizing destroys the attention signal. Best results achieved with `norm_type='none'`. Phase anchoring (fixed angle ranges) was not effective. See [research_log.md](research_log.md).
+
 #### Magnitude Normalization
 ```python
 class ComplexLayerNorm(nn.Module):
@@ -160,6 +163,7 @@ class ComplexLayerNorm(nn.Module):
 
         return torch.exp(log_mag_norm) * torch.exp(1j * phase)
 ```
+
 
 #### Soft Polarization via Parameterized Strength
 
@@ -218,10 +222,15 @@ Add to training loss with small weight. Creates attractor landscape without hard
 
 ---
 
-### Recommendation
+### Experimental Outcomes
 
-Start with **Approach A** (emergent heads) plus **diversity loss**. It's the most elegant—if it works, you've discovered that explicit head structure is unnecessary and emerges from the dynamics.
+> [!NOTE]
+> This section reflects our actual experimental findings. See [results_summary.md](results_summary.md) for detailed metrics.
 
-If Approach A shows head collapse (all dimensions learn the same thing), move to **Approach B** (explicit phase offsets) which guarantees diversity with minimal added complexity.
+| Approach | Result |
+|----------|--------|
+| **Approach A (Emergent Heads)** | ✅ **Best performer** (99.1% synthetic, 81.6% SST-2). Simpler is better. |
+| **Approach B (Phase Offsets)** | 94.4% synthetic. Effective but less flexible. |
+| **Approach C (Factored Heads)** | 90.2% synthetic. Factorization too restrictive. |
 
-Skip quaternions/Clifford algebras for now. The S¹ phase space is interpretable and sufficient for initial validation. Higher-dimensional phase spaces are an optimization, not a necessity.
+**Key discovery**: Normalization (`ComplexLayerNorm`) suppresses polarization. Best results with `norm_type='none'`.

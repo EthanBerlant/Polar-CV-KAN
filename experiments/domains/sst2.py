@@ -16,7 +16,6 @@ DEFAULTS = {
     "d_embed": 64,
     "n_layers": 2,
     "epochs": 10,
-    "norm_type": "none",
     "metric_name": "accuracy",
     "metric_mode": "max",
 }
@@ -25,7 +24,6 @@ DEFAULTS = {
 def add_args(parser):
     """Add SST2-specific arguments."""
     parser.add_argument("--d_embed", type=int, default=64, help="Embedding dimension")
-    parser.add_argument("--norm_type", type=str, default="none", choices=["layer", "rms", "none"])
     parser.add_argument(
         "--block_type", type=str, default="polarizing", choices=["polarizing", "attention"]
     )
@@ -111,7 +109,6 @@ def create_model(args):
             "n_heads": getattr(args, "n_heads", 4),
             "pooling": args.pooling,
             "input_type": "real",
-            "norm_type": args.norm_type,
             "block_type": args.block_type,
         },
     )
