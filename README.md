@@ -1,8 +1,10 @@
 # Polar CV-KAN
 
-A PyTorch implementation of **Polar Complex-Valued Kalman-Arnold Networks (CV-KAN)**.
+A PyTorch implementation of **Polar Complex-Valued Kolmogorov-Arnold Networks (CV-KAN)**.
 
 This architecture introduces a novel attention mechanism where tokens interact through **phase alignment** and **magnitude polarization** in the complex plane, without using explicit softmax attention matrices.
+
+> **📖 See [ARCHITECTURE.md](ARCHITECTURE.md)** for the full philosophy, design decisions, and module taxonomy.
 
 ## Key Features
 
@@ -14,12 +16,16 @@ This architecture introduces a novel attention mechanism where tokens interact t
   - `FactoredHeads`: Decoupled phase and magnitude processing.
 - **Tasks**:
   - Synthetic Signal/Noise Classification (99.1% accuracy).
-  - SST-2 Sentiment Analysis (~78% accuracy from scratch).
+  - SST-2 Sentiment Analysis (~81.6% accuracy from scratch).
 
 ## Installation
 
 ```bash
+# Core dependencies (with CUDA support)
 pip install -r requirements.txt
+
+# Development tools (optional)
+pip install -e ".[dev]"
 ```
 
 ## Structure
@@ -30,10 +36,15 @@ src/
   models/        # CVKAN model definitions
   data/          # Data loaders (Synthetic, SST-2)
   losses/        # Regularization terms
+  tracking.py    # MLflow experiment tracking
 experiments/
   train_synthetic.py  # Train on signal/noise task
-  train_sst2.py       # Train on Sentiment Analysis
-  visualize.py        # Visualization tools
+  train_sst2.py       # Train on Sentiment Analysis (with MLflow)
+  train_image.py      # Train on CIFAR-10
+  train_audio.py      # Train on Speech Commands
+tests/
+  test_modules.py     # Unit tests
+.agent/workflows/     # Development workflows
 ```
 
 ## Usage
@@ -51,7 +62,7 @@ python experiments/train_sst2.py --d_complex 64 --input_type real
 ```
 
 ## Results
- 
+
 | Task | Approach | Model | Result |
 |---|---|---|---|
 | Signal/Noise | Emergent Heads | CV-KAN | **99.1% Accuracy** |
@@ -66,8 +77,8 @@ We discovered that **layer normalization suppresses the magnitude-based "polariz
 - **Recommendation**: Use `norm_type='none'` for tasks relying on magnitude polarization.
 
 ## Visualization
- 
+
 The model learns to "polarize" important tokens by increasing their magnitude.
- 
+
 ![Structure](visualizations/sentiment_analysis.png)
 *(Example of attention-like magnitude spiking on sentiment words)*

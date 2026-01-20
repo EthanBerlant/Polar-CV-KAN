@@ -49,7 +49,7 @@ All comparisons will be **parameter-matched**. We will tune the `d_complex`, `ka
 
 ### Dataset
 **ETTh1** (Electricity Transformer Temperature)
-- **Why**: Industry standard for multivariate time series forecasting. 
+- **Why**: Industry standard for multivariate time series forecasting.
 - **Task**: Multivariate prediction (lookback 96, predict 96).
 
 ### Baselines

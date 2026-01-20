@@ -5,25 +5,25 @@
 # normalization would destroy this signal. Use log-magnitude centering instead
 # (built into the CVKAN model).
 
-from .polarizing_block import PolarizingBlock
-from .gated_polarization import GatedPolarization
-from .phase_attention import PhaseAttentionBlock
-from .multi_head import (
-    EmergentHeadsPolarizing,
-    PhaseOffsetPolarizing,
-    FactoredHeadsPolarizing,
-)
 from .aggregation import (
+    CausalAggregation,
     GlobalMeanAggregation,
     LocalWindowAggregation,
-    CausalAggregation,
     NeighborhoodAggregation,
 )
+from .gated_polarization import GatedPolarization
+from .multi_head import (
+    EmergentHeadsPolarizing,
+    FactoredHeadsPolarizing,
+    PhaseOffsetPolarizing,
+)
+from .phase_attention import PhaseAttentionBlock
+from .polarizing_block import PolarizingBlock
 from .positional_encoding import (
-    ComplexPositionalEncoding,
     Complex2DPositionalEncoding,
-    LearnableComplexPositionalEncoding,
+    ComplexPositionalEncoding,
     Learnable2DComplexPositionalEncoding,
+    LearnableComplexPositionalEncoding,
 )
 
 __all__ = [

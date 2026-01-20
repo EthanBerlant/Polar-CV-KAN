@@ -149,3 +149,7 @@ experiments/results/
 visualizations/*.png
 visualizations/*.jpg
 visualizations/*.pdf
+
+# MLflow
+mlruns/
+mlflow.db

@@ -8,9 +8,8 @@ Note: Traditional normalization is NOT used because magnitudes encode
 attention-like information. Log-magnitude centering is used instead.
 """
 
-from .modules import PolarizingBlock, GatedPolarization
 from .models import CVKAN
+from .modules import GatedPolarization, PolarizingBlock
 
 __version__ = "0.1.0"
 __all__ = ["PolarizingBlock", "GatedPolarization", "CVKAN"]
-

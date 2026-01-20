@@ -19,27 +19,27 @@ class PolarizingBlock(nn.Module):
             nn.Linear(kan_hidden, 2)               # sin/cos output
         )
         self.mag_scale = nn.Parameter(torch.tensor(0.1))  # small init
-        
+
     def forward(self, Z):  # Z: (batch, n_tokens, d_complex) complex tensor
         # Aggregate
         A = Z.mean(dim=1, keepdim=True)  # mean more stable than sum
-        
+
         # Decompose
         mag = torch.log(torch.abs(A) + 1e-6)
         phase_vec = torch.stack([A.real, A.imag], dim=-1)
         phase_vec = phase_vec / (torch.abs(A).unsqueeze(-1) + 1e-6)
-        
+
         # Transform (with residual structure for stability)
         mag_delta = self.psi_mag(mag.unsqueeze(-1)).squeeze(-1)
         mag_out = mag + self.mag_scale * mag_delta
-        
+
         phase_out_vec = self.psi_phase(phase_vec)
         phase_out_vec = F.normalize(phase_out_vec, dim=-1)  # stay on unit circle
-        
+
         # Recompose
         r_out = torch.exp(mag_out)
         A_new = r_out * torch.complex(phase_out_vec[..., 0], phase_out_vec[..., 1])
-        
+
         # Broadcast interaction back to tokens
         return Z + A_new
 ```
@@ -91,18 +91,18 @@ class MultiHeadPolarizing(nn.Module):
         # Fixed phase offsets: 0, 2π/H, 4π/H, ...
         offsets = torch.arange(n_heads) * (2 * math.pi / n_heads)
         self.register_buffer('phase_offsets', offsets)
-        
+
         # Shared polarizing transform (parameter efficient)
         self.polarizer = PolarizingBlock(d_per_head)
-        
+
     def forward(self, Z):  # Z: (batch, n_tokens, n_heads, d_per_head)
         # Rotate each head by its offset
         Z_rotated = Z * torch.exp(1j * self.phase_offsets[None, None, :, None])
-        
+
         # Apply shared polarizer per head
         out = self.polarizer(Z_rotated.flatten(2, 3))
         out = out.unflatten(-1, (self.n_heads, -1))
-        
+
         # Rotate back
         return out * torch.exp(-1j * self.phase_offsets[None, None, :, None])
 ```
@@ -124,19 +124,19 @@ class FactoredHeads(nn.Module):
         # Each head gets its own phase projection, shared magnitude
         self.phase_projections = nn.Parameter(torch.randn(n_heads, d_model, d_model) * 0.02)
         self.shared_mag_transform = PolarizingMagnitude(d_model)
-        
+
     def forward(self, Z):
         # Project to head-specific phase spaces
         # Z: (batch, n_tokens, d)
         Z_heads = torch.einsum('btn d, h d e -> btn h e', Z, self.phase_projections)
-        
+
         # Shared magnitude processing
         mags = torch.abs(Z_heads)
         mags_polar = self.shared_mag_transform(mags)
-        
+
         # Phases just sum naturally per head
         phases = torch.angle(Z_heads)
-        
+
         return mags_polar * torch.exp(1j * phases)
 ```
 
@@ -154,10 +154,10 @@ class ComplexLayerNorm(nn.Module):
         # Normalize log-magnitudes to zero mean, unit variance per layer
         log_mag = torch.log(torch.abs(Z) + 1e-6)
         log_mag_norm = (log_mag - log_mag.mean(dim=-1, keepdim=True)) / (log_mag.std(dim=-1, keepdim=True) + 1e-6)
-        
+
         # Preserve phase
         phase = torch.angle(Z)
-        
+
         return torch.exp(log_mag_norm) * torch.exp(1j * phase)
 ```
 
@@ -168,7 +168,7 @@ Control how aggressive the polarization is:
 class GatedPolarization(nn.Module):
     def __init__(self):
         self.polarization_strength = nn.Parameter(torch.tensor(0.0))  # starts at identity
-        
+
     def forward(self, mag):
         # Interpolate between identity and full polarization
         alpha = torch.sigmoid(self.polarization_strength)
