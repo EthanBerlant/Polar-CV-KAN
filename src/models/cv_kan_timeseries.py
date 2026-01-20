@@ -8,12 +8,15 @@ A CV-KAN variant optimized for time series forecasting using:
 
 The causal aggregation ensures that predictions at time t only depend
 on information from times 1 to t, enabling autoregressive processing.
+
+Inherits from BaseCVKAN for log-magnitude centering.
 """
 
 import torch
 import torch.nn as nn
 from typing import Literal, Optional
 
+from .base import BaseCVKAN, ComplexEmbedding
 from ..modules.polarizing_block import PolarizingBlock
 from ..modules.aggregation import CausalAggregation
 from ..modules.positional_encoding import (
@@ -22,128 +25,14 @@ from ..modules.positional_encoding import (
 )
 
 
-class TimeSeriesEmbedding(nn.Module):
-    """
-    Embed time series features to complex space.
-    
-    Args:
-        input_dim: Input feature dimension per timestep
-        d_complex: Output complex dimension
-    """
-    
-    def __init__(self, input_dim: int, d_complex: int):
-        super().__init__()
-        self.proj_real = nn.Linear(input_dim, d_complex)
-        self.proj_imag = nn.Linear(input_dim, d_complex)
-        
-        nn.init.xavier_uniform_(self.proj_real.weight, gain=0.5)
-        nn.init.xavier_uniform_(self.proj_imag.weight, gain=0.5)
-        nn.init.zeros_(self.proj_real.bias)
-        nn.init.zeros_(self.proj_imag.bias)
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Embed to complex space.
-        
-        Args:
-            x: Real tensor (batch, seq_len, input_dim)
-        
-        Returns:
-            Complex tensor (batch, seq_len, d_complex)
-        """
-        return torch.complex(self.proj_real(x), self.proj_imag(x))
-
-
-class CausalPolarizingBlock(nn.Module):
-    """
-    Polarizing block with causal aggregation.
-    
-    Uses cumulative mean aggregation so that position t only depends
-    on positions 1 through t.
-    
-    Args:
-        d_complex: Complex dimension
-        kan_hidden: Hidden size for KAN MLPs
-        mag_init_scale: Initial magnitude scale
-    """
-    
-    def __init__(
-        self,
-        d_complex: int,
-        kan_hidden: int = 32,
-        mag_init_scale: float = 0.1,
-    ):
-        super().__init__()
-        self.d_complex = d_complex
-        self.aggregation = CausalAggregation()
-        
-        # KAN approximation networks
-        self.psi_mag = nn.Sequential(
-            nn.Linear(1, kan_hidden),
-            nn.GELU(),
-            nn.Linear(kan_hidden, 1),
-        )
-        self.psi_phase = nn.Sequential(
-            nn.Linear(2, kan_hidden),
-            nn.GELU(),
-            nn.Linear(kan_hidden, 2),
-        )
-        
-        self.mag_scale = nn.Parameter(torch.tensor(mag_init_scale))
-        self._init_weights()
-    
-    def _init_weights(self):
-        for module in [self.psi_mag, self.psi_phase]:
-            for layer in module:
-                if isinstance(layer, nn.Linear):
-                    nn.init.xavier_uniform_(layer.weight, gain=0.1)
-                    nn.init.zeros_(layer.bias)
-    
-    def forward(
-        self, 
-        Z: torch.Tensor, 
-        mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        """
-        Causal polarizing forward pass.
-        
-        Args:
-            Z: Complex tensor (batch, seq_len, d_complex)
-            mask: Optional mask (batch, seq_len)
-        
-        Returns:
-            Transformed complex tensor
-        """
-        # Causal aggregate: A_t = mean(Z_1, ..., Z_t)
-        A = self.aggregation(Z, mask)  # (batch, seq_len, d_complex)
-        
-        # Polar decomposition
-        mag = torch.abs(A)
-        log_mag = torch.log(mag + 1e-6)
-        
-        phase_vec = torch.stack([A.real, A.imag], dim=-1)
-        phase_vec = phase_vec / (mag.unsqueeze(-1) + 1e-6)
-        
-        # Transform
-        mag_delta = self.psi_mag(log_mag.unsqueeze(-1)).squeeze(-1)
-        log_mag_out = log_mag + self.mag_scale * mag_delta
-        
-        phase_out_vec = self.psi_phase(phase_vec)
-        phase_out_vec = torch.nn.functional.normalize(phase_out_vec, dim=-1)
-        
-        # Recompose
-        r_out = torch.exp(log_mag_out)
-        A_new = r_out * torch.complex(phase_out_vec[..., 0], phase_out_vec[..., 1])
-        
-        return Z + A_new
-
-
-class CVKANTimeSeries(nn.Module):
+class CVKANTimeSeries(BaseCVKAN):
     """
     CV-KAN model for time series forecasting.
     
     Uses causal aggregation for autoregressive processing, with multiple
     output decoding strategies optimized for different forecasting tasks.
+    
+    Inherits from BaseCVKAN for log-magnitude centering.
     
     Args:
         input_dim: Input feature dimension per timestep
@@ -158,6 +47,7 @@ class CVKANTimeSeries(nn.Module):
             - 'both': Output both real and imaginary parts
         forecast_horizon: Number of future steps to predict (None = per-step)
         pos_encoding: 'sinusoidal', 'learnable', or None
+        center_magnitudes: Whether to center log-magnitudes (recommended)
     """
     
     def __init__(
@@ -170,14 +60,32 @@ class CVKANTimeSeries(nn.Module):
         output_mode: Literal['magnitude', 'real', 'phase', 'both'] = 'real',
         forecast_horizon: Optional[int] = None,
         pos_encoding: Optional[Literal['sinusoidal', 'learnable']] = 'sinusoidal',
+        center_magnitudes: bool = True,
     ):
-        super().__init__()
-        self.d_complex = d_complex
+        # Initialize base class (pooling not used for timeseries)
+        super().__init__(
+            d_complex=d_complex,
+            n_layers=n_layers,
+            kan_hidden=kan_hidden,
+            pooling='mean',  # Not used, but required by base
+            center_magnitudes=center_magnitudes,
+        )
+        
         self.output_mode = output_mode
         self.forecast_horizon = forecast_horizon
+        self.output_dim = output_dim
+        
+        # Override layers to use causal aggregation
+        # per_dim=False because CausalAggregation returns per-position aggregates (batch, seq, d)
+        # not global aggregates (batch, 1, d)
+        causal_agg = CausalAggregation()
+        self.layers = nn.ModuleList([
+            PolarizingBlock(d_complex, kan_hidden, aggregation=causal_agg, per_dim=False)
+            for _ in range(n_layers)
+        ])
         
         # Embedding
-        self.embedding = TimeSeriesEmbedding(input_dim, d_complex)
+        self.embedding = ComplexEmbedding(input_dim, d_complex)
         
         # Positional encoding
         if pos_encoding == 'sinusoidal':
@@ -186,12 +94,6 @@ class CVKANTimeSeries(nn.Module):
             self.pos_encoding = LearnableComplexPositionalEncoding(d_complex)
         else:
             self.pos_encoding = None
-        
-        # Causal polarizing layers
-        self.layers = nn.ModuleList([
-            CausalPolarizingBlock(d_complex, kan_hidden)
-            for _ in range(n_layers)
-        ])
         
         # Output projection
         if output_mode == 'both':
@@ -206,7 +108,6 @@ class CVKANTimeSeries(nn.Module):
                 nn.GELU(),
                 nn.Linear(kan_hidden * 2, forecast_horizon * output_dim),
             )
-            self.output_dim = output_dim
         else:
             # Per-timestep output
             self.output_proj = nn.Sequential(
@@ -266,9 +167,8 @@ class CVKANTimeSeries(nn.Module):
         if self.pos_encoding is not None:
             z = self.pos_encoding(z)
         
-        # Apply causal layers
-        for layer in self.layers:
-            z = layer(z, mask)
+        # Apply causal layers with magnitude centering (from base class)
+        z = self._apply_layers(z, mask)
         
         # Decode
         features = self._decode(z)

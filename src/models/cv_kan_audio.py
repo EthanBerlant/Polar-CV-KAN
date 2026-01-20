@@ -9,6 +9,8 @@ Key insight: STFT output is already complex-valued, so CV-KAN can
 directly process frequency-domain audio without artificial conversion.
 Frequency bins become complex dimensions, time frames become tokens.
 
+Inherits from BaseCVKAN for log-magnitude centering and pooling.
+
 Supports:
 - Direct complex STFT input (no embedding needed)
 - Audio classification (speech commands, music genre, etc.)
@@ -17,10 +19,9 @@ Supports:
 
 import torch
 import torch.nn as nn
-from typing import Literal, Optional, Tuple
+from typing import Literal, Optional
 
-from ..modules.polarizing_block import PolarizingBlock
-from ..modules.aggregation import GlobalMeanAggregation
+from .base import BaseCVKAN, build_classifier_head
 from ..modules.positional_encoding import ComplexPositionalEncoding
 
 
@@ -188,13 +189,15 @@ class FrequencyProjection(nn.Module):
         return x
 
 
-class CVKANAudio(nn.Module):
+class CVKANAudio(BaseCVKAN):
     """
     CV-KAN model for audio/speech processing.
     
     Leverages the natural complex structure of STFT spectrograms.
     Frequency bins are treated as complex dimensions, time frames
     as tokens (sequence positions).
+    
+    Inherits from BaseCVKAN for log-magnitude centering and pooling.
     
     Args:
         n_fft: FFT size for STFT (determines frequency resolution)
@@ -206,6 +209,7 @@ class CVKANAudio(nn.Module):
         task: 'classification' or 'reconstruction'
         pooling: Pooling strategy for classification ('mean', 'max', 'attention')
         use_stft_frontend: Whether to compute STFT (False if input is spectrogram)
+        center_magnitudes: Whether to center log-magnitudes (recommended)
     """
     
     def __init__(
@@ -219,16 +223,23 @@ class CVKANAudio(nn.Module):
         task: Literal['classification', 'reconstruction'] = 'classification',
         pooling: Literal['mean', 'max', 'attention'] = 'mean',
         use_stft_frontend: bool = True,
+        center_magnitudes: bool = True,
     ):
-        super().__init__()
-        self.task = task
-        self.pooling = pooling
-        self.n_fft = n_fft
-        self.hop_length = hop_length
-        
         n_freq_bins = n_fft // 2 + 1
         d_complex = d_complex or n_freq_bins
-        self.d_complex = d_complex
+        
+        # Initialize base class
+        super().__init__(
+            d_complex=d_complex,
+            n_layers=n_layers,
+            kan_hidden=kan_hidden,
+            pooling=pooling,
+            center_magnitudes=center_magnitudes,
+        )
+        
+        self.task = task
+        self.n_fft = n_fft
+        self.hop_length = hop_length
         self.n_freq_bins = n_freq_bins
         
         # STFT frontend (optional)
@@ -246,27 +257,13 @@ class CVKANAudio(nn.Module):
         # Positional encoding for time dimension
         self.pos_encoding = ComplexPositionalEncoding(d_complex)
         
-        # CV-KAN layers
-        self.layers = nn.ModuleList([
-            PolarizingBlock(d_complex, kan_hidden)
-            for _ in range(n_layers)
-        ])
-        
         # Task-specific heads
         if task == 'classification':
             assert n_classes is not None, "n_classes required for classification"
-            
-            if pooling == 'attention':
-                # Learnable query for attention pooling
-                self.pool_query = nn.Parameter(
-                    torch.randn(1, 1, d_complex, dtype=torch.cfloat) * 0.02
-                )
-            
-            self.classifier = nn.Sequential(
-                nn.Linear(d_complex, kan_hidden * 2),
-                nn.GELU(),
-                nn.Dropout(0.1),
-                nn.Linear(kan_hidden * 2, n_classes),
+            self.classifier = build_classifier_head(
+                d_complex=d_complex,
+                n_classes=n_classes,
+                hidden_dim=kan_hidden * 2,
             )
         
         elif task == 'reconstruction':
@@ -285,35 +282,6 @@ class CVKANAudio(nn.Module):
                 n_fft=n_fft,
                 hop_length=hop_length,
             )
-    
-    def _pool(self, z: torch.Tensor) -> torch.Tensor:
-        """
-        Pool across time dimension.
-        
-        Args:
-            z: Complex tensor (batch, time, d_complex)
-        
-        Returns:
-            Pooled tensor (batch, d_complex)
-        """
-        if self.pooling == 'mean':
-            return z.mean(dim=1)
-        elif self.pooling == 'max':
-            mags = torch.abs(z)
-            max_idx = mags.sum(dim=-1).argmax(dim=1, keepdim=True)
-            return torch.gather(
-                z, 1, 
-                max_idx.unsqueeze(-1).expand(-1, -1, self.d_complex)
-            ).squeeze(1)
-        elif self.pooling == 'attention':
-            # Attention-based pooling using phase similarity
-            query = self.pool_query.expand(z.shape[0], -1, -1)
-            # Compute attention via complex inner product
-            attn = torch.einsum('btd,bqd->btq', z, query.conj())
-            attn = torch.softmax(attn.abs(), dim=1)
-            return torch.einsum('btq,btd->bqd', attn, z).squeeze(1)
-        else:
-            raise ValueError(f"Unknown pooling: {self.pooling}")
     
     def forward(
         self,
@@ -350,16 +318,15 @@ class CVKANAudio(nn.Module):
         # Apply positional encoding
         z = self.pos_encoding(z)
         
-        # CV-KAN layers
-        for layer in self.layers:
-            z = layer(z)
+        # Apply CV-KAN layers with magnitude centering (from base class)
+        z = self._apply_layers(z)
         
         output = {}
         
         if self.task == 'classification':
-            # Pool and classify
+            # Pool across time (from base class)
             pooled = self._pool(z)
-            features = torch.abs(pooled)
+            features = self._extract_features(pooled)
             logits = self.classifier(features)
             
             output['logits'] = logits

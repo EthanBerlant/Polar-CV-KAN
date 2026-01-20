@@ -76,7 +76,7 @@ def parse_args():
     
     # Data args
     parser.add_argument('--data_root', type=str, default='./data/speech_commands')
-    parser.add_argument('--batch_size', type=int, default=64)
+    parser.add_argument('--batch_size', type=int, default=256)  # Larger batch for GPU utilization
     parser.add_argument('--subset_size', type=int, default=None, help='Use subset for pilot runs')
     
     # Model args

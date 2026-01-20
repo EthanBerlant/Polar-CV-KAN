@@ -11,57 +11,22 @@ Note: Traditional normalization (LayerNorm, RMSNorm) is intentionally NOT used
 because magnitudes in CV-KAN encode attention-like information. Normalizing
 would destroy this signal. Instead, we use log-magnitude centering which
 preserves relative magnitudes while preventing absolute scale drift.
+
+Inherits from BaseCVKAN for shared functionality.
 """
 
 import torch
 import torch.nn as nn
 from typing import Literal
 
-from ..modules import PolarizingBlock
+from .base import BaseCVKAN, ComplexEmbedding, build_classifier_head
+from ..modules.polarizing_block import PolarizingBlock
 from ..modules.multi_head import (
     EmergentHeadsPolarizing,
     PhaseOffsetPolarizing,
     FactoredHeadsPolarizing,
 )
 from ..modules.phase_attention import PhaseAttentionBlock
-
-
-class ComplexEmbedding(nn.Module):
-    """
-    Project real-valued input to complex space.
-    
-    Args:
-        input_dim: Input feature dimension
-        d_complex: Output complex dimension
-    """
-    
-    def __init__(self, input_dim: int, d_complex: int):
-        super().__init__()
-        self.d_complex = d_complex
-        
-        # Project to real and imaginary parts
-        self.proj_real = nn.Linear(input_dim, d_complex)
-        self.proj_imag = nn.Linear(input_dim, d_complex)
-        
-        # Initialize to small values
-        nn.init.xavier_uniform_(self.proj_real.weight, gain=0.5)
-        nn.init.xavier_uniform_(self.proj_imag.weight, gain=0.5)
-        nn.init.zeros_(self.proj_real.bias)
-        nn.init.zeros_(self.proj_imag.bias)
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Project to complex space.
-        
-        Args:
-            x: Real tensor of shape (..., input_dim)
-        
-        Returns:
-            Complex tensor of shape (..., d_complex)
-        """
-        real = self.proj_real(x)
-        imag = self.proj_imag(x)
-        return torch.complex(real, imag)
 
 
 class ComplexInputEmbedding(nn.Module):
@@ -95,13 +60,15 @@ class ComplexInputEmbedding(nn.Module):
         return x
 
 
-class CVKAN(nn.Module):
+class CVKAN(BaseCVKAN):
     """
     Complete CV-KAN model for sequence classification.
     
     This architecture uses complex-valued representations where magnitudes
     encode attention-like information ("polarization"). Traditional normalization
     is NOT used because it would destroy the magnitude signal.
+    
+    Inherits from BaseCVKAN for log-magnitude centering and pooling.
     
     Args:
         d_input: Input dimension (real if input_type='real', complex if 'complex')
@@ -112,7 +79,7 @@ class CVKAN(nn.Module):
         head_approach: 'emergent', 'offset', or 'factored' (for polarizing block)
         n_heads: Number of heads (for offset/factored/attention)
         input_type: 'real' or 'complex'
-        pooling: 'mean', 'max', or 'first'
+        pooling: 'mean', 'max', or 'attention'
         block_type: 'polarizing' or 'attention'
         center_magnitudes: Whether to center log-magnitudes to prevent drift
     """
@@ -127,17 +94,21 @@ class CVKAN(nn.Module):
         head_approach: Literal['emergent', 'offset', 'factored'] = 'emergent',
         n_heads: int = 8,
         input_type: Literal['real', 'complex'] = 'complex',
-        pooling: Literal['mean', 'max', 'first'] = 'mean',
+        pooling: Literal['mean', 'max', 'attention'] = 'mean',
         block_type: Literal['polarizing', 'attention'] = 'polarizing',
         center_magnitudes: bool = True,
     ):
-        super().__init__()
-        self.d_complex = d_complex
-        self.n_layers = n_layers
-        self.pooling = pooling
+        # Initialize base class
+        super().__init__(
+            d_complex=d_complex,
+            n_layers=n_layers,
+            kan_hidden=kan_hidden,
+            pooling=pooling,
+            center_magnitudes=center_magnitudes,
+        )
+        
         self.head_approach = head_approach
         self.block_type = block_type
-        self.center_magnitudes = center_magnitudes
         
         # Input embedding
         if input_type == 'real':
@@ -145,58 +116,46 @@ class CVKAN(nn.Module):
         else:
             self.embedding = ComplexInputEmbedding(d_input, d_complex)
         
-        # Build layers based on approach (no normalization layers)
-        self.layers = nn.ModuleList()
+        # Override layers with configured block type
+        self.layers = self._build_cvkan_layers(head_approach, block_type, n_heads)
         
-        for _ in range(n_layers):
-            # Select Block Type
+        # Classification head (operates on magnitude)
+        self.classifier = build_classifier_head(
+            d_complex=d_complex,
+            n_classes=n_classes,
+            hidden_dim=kan_hidden,
+            dropout=0.0,  # Keep original behavior
+        )
+    
+    def _build_cvkan_layers(
+        self, 
+        head_approach: str, 
+        block_type: str, 
+        n_heads: int
+    ) -> nn.ModuleList:
+        """Build layers based on head approach and block type."""
+        layers = nn.ModuleList()
+        
+        for _ in range(self.n_layers):
             if block_type == 'polarizing':
                 if head_approach == 'emergent':
-                    layer = EmergentHeadsPolarizing(d_complex, kan_hidden)
+                    layer = EmergentHeadsPolarizing(self.d_complex, self.kan_hidden)
                 elif head_approach == 'offset':
-                    d_per_head = d_complex // n_heads
-                    layer = PhaseOffsetPolarizing(n_heads, d_per_head, kan_hidden)
+                    d_per_head = self.d_complex // n_heads
+                    layer = PhaseOffsetPolarizing(n_heads, d_per_head, self.kan_hidden)
                 elif head_approach == 'factored':
-                    d_per_head = d_complex // n_heads
-                    layer = FactoredHeadsPolarizing(n_heads, d_complex, d_per_head, kan_hidden)
+                    d_per_head = self.d_complex // n_heads
+                    layer = FactoredHeadsPolarizing(n_heads, self.d_complex, d_per_head, self.kan_hidden)
                 else:
                     raise ValueError(f"Unknown head approach: {head_approach}")
             elif block_type == 'attention':
-                layer = PhaseAttentionBlock(d_complex, n_heads=n_heads)
+                layer = PhaseAttentionBlock(self.d_complex, n_heads=n_heads)
             else:
-                 raise ValueError(f"Unknown block type: {block_type}")
+                raise ValueError(f"Unknown block type: {block_type}")
             
-            self.layers.append(layer)
+            layers.append(layer)
         
-        # Classification head (operates on magnitude)
-        self.classifier = nn.Sequential(
-            nn.Linear(d_complex, kan_hidden),
-            nn.GELU(),
-            nn.Linear(kan_hidden, n_classes),
-        )
-    
-    def _center_log_magnitudes(self, Z: torch.Tensor) -> torch.Tensor:
-        """
-        Center log-magnitudes across tokens to prevent drift.
-        
-        This is the CV-KAN alternative to normalization. It preserves:
-        - Relative magnitudes between tokens (the "attention" signal)
-        - Per-dimension magnitude specialization
-        
-        While preventing:
-        - Exponential magnitude growth/collapse over many layers
-        
-        Args:
-            Z: Complex tensor of shape (batch, n_tokens, d_complex)
-        
-        Returns:
-            Complex tensor with centered log-magnitudes
-        """
-        log_mags = torch.log(torch.abs(Z) + 1e-6)
-        # Center across tokens (dim=1), not dimensions
-        log_mags_centered = log_mags - log_mags.mean(dim=1, keepdim=True)
-        # Reconstruct: exp(centered log-mag) * unit phase
-        return torch.exp(log_mags_centered) * torch.exp(1j * torch.angle(Z))
+        return layers
     
     def forward(
         self,
@@ -225,40 +184,21 @@ class CVKAN(nn.Module):
         if return_intermediates:
             intermediates.append(Z.clone())
         
-        # Apply polarizing layers (no normalization)
+        # Apply polarizing layers
         for layer in self.layers:
             Z = layer(Z, mask=mask)
             if return_intermediates:
                 intermediates.append(Z.clone())
         
-        # Center log-magnitudes to prevent drift while preserving relative magnitudes
+        # Center log-magnitudes (from base class)
         if self.center_magnitudes:
             Z = self._center_log_magnitudes(Z)
         
-        # Pool across tokens
-        if self.pooling == 'mean':
-            if mask is not None:
-                mask_expanded = mask.unsqueeze(-1).float()
-                sum_Z = (Z * mask_expanded).sum(dim=1)
-                count = mask_expanded.sum(dim=1).clamp(min=1.0)
-                pooled = sum_Z / count
-            else:
-                pooled = Z.mean(dim=1)
-        elif self.pooling == 'max':
-            # Max by magnitude (mask out padding by setting mag to -inf)
-            mags = torch.abs(Z)
-            if mask is not None:
-                mags = mags.masked_fill(~mask.bool().unsqueeze(-1), -1e9)
-            
-            max_idx = mags.argmax(dim=1, keepdim=True)
-            pooled = torch.gather(Z, 1, max_idx.expand(-1, -1, Z.shape[-1])).squeeze(1)
-        elif self.pooling == 'first':
-            pooled = Z[:, 0]
-        else:
-            raise ValueError(f"Unknown pooling: {self.pooling}")
+        # Pool across tokens (from base class)
+        pooled = self._pool(Z, mask)
         
         # Classify based on magnitude (phase-invariant)
-        features = torch.abs(pooled)
+        features = self._extract_features(pooled)
         logits = self.classifier(features)
         
         output = {
@@ -307,10 +247,10 @@ class CVKANTokenClassifier(CVKAN):
         super().__init__(n_classes=n_classes, **kwargs)
         
         # Replace classifier with per-token version
-        self.classifier = nn.Sequential(
-            nn.Linear(kwargs.get('d_complex', 64), kwargs.get('kan_hidden', 32)),
+        self.token_classifier = nn.Sequential(
+            nn.Linear(self.d_complex, self.kan_hidden),
             nn.GELU(),
-            nn.Linear(kwargs.get('kan_hidden', 32), n_classes),
+            nn.Linear(self.kan_hidden, n_classes),
         )
     
     def forward(
@@ -335,19 +275,19 @@ class CVKANTokenClassifier(CVKAN):
         if return_intermediates:
             intermediates.append(Z.clone())
         
-        # Apply layers (no normalization)
+        # Apply layers
         for layer in self.layers:
             Z = layer(Z, mask=mask)
             if return_intermediates:
                 intermediates.append(Z.clone())
         
-        # Center log-magnitudes to prevent drift
+        # Center log-magnitudes
         if self.center_magnitudes:
             Z = self._center_log_magnitudes(Z)
         
         # Per-token classification (on magnitudes)
         token_features = torch.abs(Z)  # (batch, n_tokens, d)
-        token_logits = self.classifier(token_features)  # (batch, n_tokens, n_classes)
+        token_logits = self.token_classifier(token_features)  # (batch, n_tokens, n_classes)
         
         # Sequence-level: pool token logits
         if mask is not None:

@@ -21,12 +21,20 @@ class PolarizingBlock(nn.Module):
     Core polarizing block that enables token interaction through 
     phase alignment and magnitude polarization.
     
+    Enhanced with configurable capacity for fair comparison with transformers:
+    - MLP expansion factor for wider hidden layers
+    - Per-dimension magnitude/phase transforms (vs shared 1D functions)
+    - Deeper MLP option
+    - Pre/post projection layers
+    
     Args:
         d_complex: Number of complex dimensions
-        kan_hidden: Hidden size for the KAN approximation MLPs
+        kan_hidden: Base hidden size for KAN MLPs
         mag_init_scale: Initial scale for magnitude transform (small = stable)
-        aggregation: Custom aggregation strategy (default: GlobalMeanAggregation).
-                     Must be an nn.Module with forward(Z, mask) -> aggregated tensor.
+        aggregation: Custom aggregation strategy (default: GlobalMeanAggregation)
+        mlp_expansion: Expansion factor for MLP width (default 4)
+        per_dim: If True, use per-dimension transforms (more params)
+        deep_mlp: If True, use 3-layer MLPs instead of 2-layer
     """
     
     def __init__(
@@ -35,27 +43,82 @@ class PolarizingBlock(nn.Module):
         kan_hidden: int = 32,
         mag_init_scale: float = 0.1,
         aggregation: Optional[nn.Module] = None,
+        mlp_expansion: int = 4,
+        per_dim: bool = True,
+        deep_mlp: bool = True,
     ):
         super().__init__()
         self.d_complex = d_complex
+        self.per_dim = per_dim
         
         # Aggregation strategy (default: global mean)
         self.aggregation = aggregation if aggregation is not None else GlobalMeanAggregation()
         
-        # Learnable 1D functions (small MLPs as KAN approximation)
-        # Magnitude transform: log(|z|) -> log(|z'|)
-        self.psi_mag = nn.Sequential(
-            nn.Linear(1, kan_hidden),
-            nn.GELU(),
-            nn.Linear(kan_hidden, 1),
-        )
+        # Expanded hidden dimension
+        hidden_dim = kan_hidden * mlp_expansion
         
-        # Phase transform: (cos θ, sin θ) -> (cos θ', sin θ')
-        self.psi_phase = nn.Sequential(
-            nn.Linear(2, kan_hidden),
-            nn.GELU(),
-            nn.Linear(kan_hidden, 2),
-        )
+        if per_dim:
+            # Per-dimension transforms: input/output is full d_complex
+            # This is the main source of parameter increase
+            
+            if deep_mlp:
+                # 3-layer MLP for magnitude: d_complex -> hidden -> hidden -> d_complex
+                self.psi_mag = nn.Sequential(
+                    nn.Linear(d_complex, hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim, d_complex),
+                )
+                
+                # 3-layer MLP for phase: 2*d_complex -> hidden -> hidden -> 2*d_complex
+                self.psi_phase = nn.Sequential(
+                    nn.Linear(2 * d_complex, hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim, 2 * d_complex),
+                )
+            else:
+                # 2-layer MLP
+                self.psi_mag = nn.Sequential(
+                    nn.Linear(d_complex, hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim, d_complex),
+                )
+                self.psi_phase = nn.Sequential(
+                    nn.Linear(2 * d_complex, hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim, 2 * d_complex),
+                )
+        else:
+            # Original shared 1D transforms (low param count)
+            if deep_mlp:
+                self.psi_mag = nn.Sequential(
+                    nn.Linear(1, hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim, 1),
+                )
+                self.psi_phase = nn.Sequential(
+                    nn.Linear(2, hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim, 2),
+                )
+            else:
+                self.psi_mag = nn.Sequential(
+                    nn.Linear(1, hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim, 1),
+                )
+                self.psi_phase = nn.Sequential(
+                    nn.Linear(2, hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim, 2),
+                )
         
         # Small initial scale for stability
         self.mag_scale = nn.Parameter(torch.tensor(mag_init_scale))
@@ -87,7 +150,6 @@ class PolarizingBlock(nn.Module):
         A = self.aggregation(Z, mask)
         
         # Decompose to polar coordinates
-
         mag = torch.abs(A)
         log_mag = torch.log(mag + 1e-6)  # Log-space for multiplicative dynamics
         
@@ -95,13 +157,37 @@ class PolarizingBlock(nn.Module):
         phase_vec = torch.stack([A.real, A.imag], dim=-1)  # (batch, 1, d, 2)
         phase_vec = phase_vec / (mag.unsqueeze(-1) + 1e-6)
         
-        # Transform magnitude (with residual for stability)
-        mag_delta = self.psi_mag(log_mag.unsqueeze(-1)).squeeze(-1)
-        log_mag_out = log_mag + self.mag_scale * mag_delta
-        
-        # Transform phase (output normalized to stay on unit circle)
-        phase_out_vec = self.psi_phase(phase_vec)
-        phase_out_vec = F.normalize(phase_out_vec, dim=-1)
+        if self.per_dim:
+            # Per-dimension transform: flatten to (batch, d_complex) or (batch, 2*d_complex)
+            # Handle both (batch, d) and (batch, 1, d) shapes from aggregation
+            orig_shape = log_mag.shape
+            if log_mag.dim() == 3:
+                # (batch, 1, d) -> (batch, d)
+                log_mag_flat = log_mag.squeeze(1)
+                phase_flat = phase_vec.squeeze(1).reshape(phase_vec.shape[0], -1)  # (batch, 2*d)
+            else:
+                log_mag_flat = log_mag
+                phase_flat = phase_vec.reshape(phase_vec.shape[0], -1)
+            
+            # Transform
+            mag_delta = self.psi_mag(log_mag_flat)
+            log_mag_out = log_mag_flat + self.mag_scale * mag_delta
+            
+            phase_out_flat = self.psi_phase(phase_flat)
+            phase_out_vec = phase_out_flat.reshape(-1, self.d_complex, 2)
+            phase_out_vec = F.normalize(phase_out_vec, dim=-1)
+            
+            # Restore original shape if needed
+            if len(orig_shape) == 3:
+                log_mag_out = log_mag_out.unsqueeze(1)
+                phase_out_vec = phase_out_vec.unsqueeze(1)
+        else:
+            # Original shared transform
+            mag_delta = self.psi_mag(log_mag.unsqueeze(-1)).squeeze(-1)
+            log_mag_out = log_mag + self.mag_scale * mag_delta
+            
+            phase_out_vec = self.psi_phase(phase_vec)
+            phase_out_vec = F.normalize(phase_out_vec, dim=-1)
         
         # Recompose to complex
         r_out = torch.exp(log_mag_out)

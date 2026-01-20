@@ -4,23 +4,22 @@ CV-KAN Image Classifier.
 A CV-KAN variant optimized for image classification using:
 - Patch-based embedding (ViT-style)
 - Optional 2D positional encoding
-- Local or global aggregation
+- Global aggregation for polarization
 - Magnitude-based classification
 
-The patch embedding converts image pixels to complex representations,
-and the model leverages CV-KAN's phase mechanics for feature extraction.
+Inherits from BaseCVKAN for log-magnitude centering and pooling.
 """
 
 import torch
 import torch.nn as nn
 from typing import Literal, Optional, Tuple
 
-from ..modules.polarizing_block import PolarizingBlock
-from ..modules.aggregation import GlobalMeanAggregation, LocalWindowAggregation
+from .base import BaseCVKAN, build_classifier_head
 from ..modules.positional_encoding import (
     Complex2DPositionalEncoding,
     Learnable2DComplexPositionalEncoding,
 )
+from ..modules.pooling import AttentionPool2d
 
 
 class PatchEmbedding(nn.Module):
@@ -98,15 +97,98 @@ class PatchEmbedding(nn.Module):
         return z, (self.n_patches_h, self.n_patches_w)
 
 
-class CVKANImageClassifier(nn.Module):
+class DeepPatchEmbedding(nn.Module):
+    """
+    Deep convolutional patch embedding for better feature extraction.
+    
+    Uses a 2-layer convolutional stem instead of a single linear projection:
+    1. Conv2d(3 -> d/2, 3x3, stride 2) -> BN -> ReLU
+    2. Conv2d(d/2 -> d, 3x3, stride 2) -> BN -> ReLU
+    
+    Args:
+        img_size: Input image size
+        patch_size: Patch size (must be 4 for this implementation to match stride=4 total)
+        in_channels: Input channels
+        d_complex: Output complex dimension
+    """
+    def __init__(
+        self,
+        img_size: int | Tuple[int, int] = 32,
+        patch_size: int | Tuple[int, int] = 4, # Designed for patch_size=4 (CIFAR)
+        in_channels: int = 3,
+        d_complex: int = 64,
+    ):
+        super().__init__()
+        
+        if isinstance(img_size, int):
+            img_size = (img_size, img_size)
+        if isinstance(patch_size, int):
+            patch_size = (patch_size, patch_size)
+            
+        self.img_size = img_size
+        self.patch_size = patch_size
+        
+        # Determine strides based on patch size (assuming 2 layers)
+        # For patch_size=4, we need total stride 4 = 2 * 2
+        s1, s2 = 2, 2
+        
+        self.n_patches_h = img_size[0] // patch_size[0]
+        self.n_patches_w = img_size[1] // patch_size[1]
+        self.n_patches = self.n_patches_h * self.n_patches_w
+        self.d_complex = d_complex
+        
+        dim1 = d_complex // 2
+        dim2 = d_complex
+        
+        # Real branch stem
+        self.conv_real = nn.Sequential(
+            nn.Conv2d(in_channels, dim1, kernel_size=3, stride=s1, padding=1, bias=False),
+            nn.BatchNorm2d(dim1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(dim1, dim2, kernel_size=3, stride=s2, padding=1, bias=False),
+            nn.BatchNorm2d(dim2),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Imag branch stem (separate weights to learn phase info independently)
+        self.conv_imag = nn.Sequential(
+            nn.Conv2d(in_channels, dim1, kernel_size=3, stride=s1, padding=1, bias=False),
+            nn.BatchNorm2d(dim1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(dim1, dim2, kernel_size=3, stride=s2, padding=1, bias=False),
+            nn.BatchNorm2d(dim2),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Tuple[int, int]]:
+        """
+        Args:
+            x: (B, C, H, W)
+        Returns:
+            z: (B, N, d_complex)
+        """
+        real = self.conv_real(x) # (B, D, H/4, W/4)
+        imag = self.conv_imag(x)
+        
+        z = torch.complex(real, imag)
+        
+        # Flatten spatial dims to patches
+        B, D, H, W = z.shape
+        z = z.flatten(2).transpose(1, 2) # (B, H*W, D)
+        
+        return z, (H, W)
+
+
+class CVKANImageClassifier(BaseCVKAN):
     """
     CV-KAN model for image classification.
     
     Architecture:
     1. Patch embedding: Image -> patches -> complex embeddings
     2. Optional 2D positional encoding
-    3. Stack of CV-KAN layers with configurable aggregation
-    4. Global pooling -> magnitude -> classifier
+    3. Stack of CV-KAN layers with global aggregation
+    4. Log-magnitude centering (from BaseCVKAN)
+    5. Global pooling -> magnitude features -> classifier
     
     Args:
         img_size: Input image size
@@ -116,11 +198,9 @@ class CVKANImageClassifier(nn.Module):
         n_layers: Number of CV-KAN layers
         n_classes: Number of output classes
         kan_hidden: Hidden size for KAN MLPs
-        aggregation: 'global' or 'local' aggregation strategy
-        local_kernel_size: Kernel size for local aggregation
         pos_encoding: 'sinusoidal', 'learnable', or None
-        pooling: 'mean', 'max', or 'cls' (if using CLS token)
-        use_cls_token: Whether to prepend a learnable CLS token
+        pooling: 'mean', 'max', or 'attention'
+        center_magnitudes: Whether to center log-magnitudes (recommended)
     """
     
     def __init__(
@@ -132,35 +212,37 @@ class CVKANImageClassifier(nn.Module):
         n_layers: int = 6,
         n_classes: int = 1000,
         kan_hidden: int = 32,
-        aggregation: Literal['global', 'local'] = 'local',
-        local_kernel_size: int = 3,
         pos_encoding: Optional[Literal['sinusoidal', 'learnable']] = 'sinusoidal',
-        pooling: Literal['mean', 'max', 'cls'] = 'mean',
-        use_cls_token: bool = False,
+        pooling: Literal['mean', 'max', 'attention'] = 'mean',
+        embedding_type: Literal['standard', 'deep'] = 'standard',
+        center_magnitudes: bool = True,
     ):
-        super().__init__()
-        self.d_complex = d_complex
-        self.pooling = pooling
-        self.use_cls_token = use_cls_token
+        # Initialize base class
+        super().__init__(
+            d_complex=d_complex,
+            n_layers=n_layers,
+            kan_hidden=kan_hidden,
+            pooling=pooling,
+            center_magnitudes=center_magnitudes,
+        )
         
         # Patch embedding
-        self.patch_embed = PatchEmbedding(
-            img_size=img_size,
-            patch_size=patch_size,
-            in_channels=in_channels,
-            d_complex=d_complex,
-        )
+        if embedding_type == 'deep':
+            self.patch_embed = DeepPatchEmbedding(
+                img_size=img_size,
+                patch_size=patch_size,
+                in_channels=in_channels,
+                d_complex=d_complex,
+            )
+        else:
+            self.patch_embed = PatchEmbedding(
+                img_size=img_size,
+                patch_size=patch_size,
+                in_channels=in_channels,
+                d_complex=d_complex,
+            )
         n_patches_h = self.patch_embed.n_patches_h
         n_patches_w = self.patch_embed.n_patches_w
-        
-        # CLS token (optional)
-        if use_cls_token:
-            self.cls_token = nn.Parameter(
-                torch.randn(1, 1, dtype=torch.cfloat) * 0.02
-            ).expand(1, 1, d_complex).clone()
-            self.cls_token = nn.Parameter(
-                torch.randn(1, 1, d_complex, dtype=torch.cfloat) * 0.02
-            )
         
         # Positional encoding
         if pos_encoding == 'sinusoidal':
@@ -178,30 +260,51 @@ class CVKANImageClassifier(nn.Module):
         else:
             self.pos_encoding = None
         
-        # Aggregation strategy
-        if aggregation == 'local':
-            self.aggregation = LocalWindowAggregation(
-                kernel_size=local_kernel_size,
-                stride=1,
-            )
-        else:
-            self.aggregation = GlobalMeanAggregation()
-        
-        # CV-KAN layers
-        self.layers = nn.ModuleList([
-            PolarizingBlock(d_complex, kan_hidden, aggregation=self.aggregation)
-            for _ in range(n_layers)
-        ])
-        
         # Classification head
-        self.classifier = nn.Sequential(
-            nn.Linear(d_complex, kan_hidden * 2),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(kan_hidden * 2, n_classes),
+        self.classifier = build_classifier_head(
+            d_complex=d_complex,
+            n_classes=n_classes,
+            hidden_dim=kan_hidden * 2,
         )
         
+        # Pooling
+        if pooling == 'attention':
+            self.attention_pool = AttentionPool2d(in_channels=d_complex)
+        
         self.spatial_shape = (n_patches_h, n_patches_w)
+    
+    def _pool(self, z: torch.Tensor) -> torch.Tensor:
+        """Override pooling to support attention pooling."""
+        if self.pooling_strategy == 'attention':
+            # z is (B, N, d_complex) - complex
+            # We want to pool based on magnitude or learn attention over complex?
+            # AttentionPool2d expects Real input.
+            # Let's pool the Real and Imag parts separately with shared attention or operate on Magnitude?
+            
+            # Alternative: Attention over complex vectors using magnitude for scoring?
+            # Or just separate attention for Real/Imag.
+            
+            # Let's assume we treat Real and Imag as 2*D features for attention scoring, 
+            # but we want to return a Complex result.
+            
+            # For simplicity: Use AttentionPool2d on the concatenation of Real/Imag,
+            # but that gives a Real output.
+            
+            # Better strategy: Apply AttentionPool2d to Real and Imag separately 
+            # (which means different attention for real/imag components - flexible).
+            
+            real = z.real
+            imag = z.imag
+            
+            # We need to share the attention weights if we want phase coherence?
+            # But AttentionPool2d computes weights internally.
+            
+            # Let's use the provided AttentionPool2d on Real and Imag separately for now.
+            pooled_real = self.attention_pool(real)
+            pooled_imag = self.attention_pool(imag)
+            return torch.complex(pooled_real, pooled_imag)
+            
+        return super()._pool(z)
     
     def forward(
         self,
@@ -218,63 +321,31 @@ class CVKANImageClassifier(nn.Module):
         Returns:
             Dictionary with:
                 - logits: Classification logits (batch, n_classes)
-                - features: Pooled features (if return_features=True)
+                - features: Magnitude features (if return_features=True)
+                - pooled: Pooled complex representation (if return_features=True)
         """
-        batch = x.shape[0]
-        
         # Patch embedding
         z, spatial_shape = self.patch_embed(x)  # (batch, n_patches, d_complex)
         
-        # Add CLS token if using
-        if self.use_cls_token:
-            cls_tokens = self.cls_token.expand(batch, -1, -1)
-            z = torch.cat([cls_tokens, z], dim=1)
-        
         # Apply positional encoding
         if self.pos_encoding is not None:
-            if self.use_cls_token:
-                # Apply pos encoding only to patch tokens
-                z_patches = self.pos_encoding(
-                    z[:, 1:], 
-                    spatial_shape=spatial_shape
-                )
-                z = torch.cat([z[:, :1], z_patches], dim=1)
-            else:
-                z = self.pos_encoding(z, spatial_shape=spatial_shape)
+            z = self.pos_encoding(z, spatial_shape=spatial_shape)
         
-        # Apply CV-KAN layers
-        for layer in self.layers:
-            z = layer(z)
+        # Apply CV-KAN layers with magnitude centering (from base class)
+        z = self._apply_layers(z)
         
-        # Pool
-        if self.pooling == 'cls' and self.use_cls_token:
-            pooled = z[:, 0]  # CLS token
-        elif self.pooling == 'mean':
-            if self.use_cls_token:
-                pooled = z[:, 1:].mean(dim=1)
-            else:
-                pooled = z.mean(dim=1)
-        elif self.pooling == 'max':
-            if self.use_cls_token:
-                z_patches = z[:, 1:]
-            else:
-                z_patches = z
-            mags = torch.abs(z_patches)
-            max_idx = mags.sum(dim=-1).argmax(dim=1, keepdim=True)
-            pooled = torch.gather(
-                z_patches, 1, 
-                max_idx.unsqueeze(-1).expand(-1, -1, self.d_complex)
-            ).squeeze(1)
-        else:
-            raise ValueError(f"Unknown pooling: {self.pooling}")
+        # Pool across patches (from base class)
+        pooled = self._pool(z)
         
-        # Classify using magnitudes
-        features = torch.abs(pooled)
+        # Extract magnitude features (from base class)
+        features = self._extract_features(pooled)
+        
+        # Classify
         logits = self.classifier(features)
         
         output = {'logits': logits}
         if return_features:
-            output['features'] = pooled
-            output['feature_magnitudes'] = features
+            output['features'] = features
+            output['pooled'] = pooled
         
         return output

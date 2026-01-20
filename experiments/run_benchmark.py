@@ -59,9 +59,9 @@ class ExperimentResult:
 class BenchmarkRunner:
     """Orchestrates running all benchmark experiments."""
     
-    # Parameter sweep configurations
-    D_COMPLEX_VALUES = [32, 64, 128]
-    N_LAYERS_VALUES = [2, 4, 6]
+    # Parameter sweep configurations - sized to match baseline models (~200-500k params)
+    D_COMPLEX_VALUES = [128, 256]
+    N_LAYERS_VALUES = [4, 6]
     SEEDS = [42, 123, 456]
     
     # Domain-specific settings
@@ -95,11 +95,13 @@ class BenchmarkRunner:
         },
     }
     
-    def __init__(self, output_dir: str = 'outputs/benchmark', pilot: bool = False, amp: bool = True):
+    def __init__(self, output_dir: str = 'outputs/benchmark', pilot: bool = False, amp: bool = True, patience: Optional[int] = None, epochs: Optional[int] = None):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.pilot = pilot
         self.amp = amp
+        self.patience_override = patience
+        self.epochs_override = epochs
         self.results: List[ExperimentResult] = []
         self.checkpoint_path = self.output_dir / 'checkpoint.json'
         self.completed_runs: set = set()
@@ -108,27 +110,32 @@ class BenchmarkRunner:
         self.session_id = datetime.now().strftime('%Y%m%d_%H%M%S')
         
     def generate_configs(self, domains: Optional[List[str]] = None) -> List[ExperimentConfig]:
-        """Generate all experiment configurations."""
-        configs = []
-        domains = domains or ['image', 'timeseries', 'audio']
+        """Generate all experiment configurations.
+        
+        Interleaves domains horizontally (round-robin) rather than running
+        all experiments for one domain before moving to the next.
+        """
+        domains = domains or ['timeseries', 'image', 'audio']
         model_types = ['cvkan', 'baseline']
         
         seeds = [42] if self.pilot else self.SEEDS
         d_values = [64] if self.pilot else self.D_COMPLEX_VALUES
         n_values = [4] if self.pilot else self.N_LAYERS_VALUES
         
-        for domain in domains:
-            domain_cfg = self.DOMAIN_CONFIGS[domain]
-            epochs = domain_cfg['pilot_epochs'] if self.pilot else domain_cfg['epochs']
-            patience = domain_cfg['patience']
-            subset = domain_cfg['pilot_subset'] if self.pilot else None
-            
-            for model_type in model_types:
-                for d_complex in d_values:
-                    # M5 baseline doesn't use n_layers, but we'll iterate anyway and it is ignored in script
-                    # For LSTM/ViT it is used.
-                    for n_layers in n_values:
-                        for seed in seeds:
+        # Build configs grouped by hyperparameter combo for horizontal slicing
+        # This ensures we run one experiment per domain before repeating
+        configs = []
+        
+        for d_complex in d_values:
+            for n_layers in n_values:
+                for seed in seeds:
+                    for model_type in model_types:
+                        for domain in domains:
+                            domain_cfg = self.DOMAIN_CONFIGS[domain]
+                            epochs = self.epochs_override if self.epochs_override else (domain_cfg['pilot_epochs'] if self.pilot else domain_cfg['epochs'])
+                            patience = self.patience_override if self.patience_override else domain_cfg['patience']
+                            subset = domain_cfg['pilot_subset'] if self.pilot else None
+                            
                             configs.append(ExperimentConfig(
                                 domain=domain,
                                 model_type=model_type,
@@ -393,14 +400,18 @@ def main():
     parser.add_argument('--domains', type=str, nargs='+', 
                         choices=['image', 'timeseries', 'audio'],
                         help='Specific domains to run (default: all)')
-    parser.add_argument('--amp', action='store_true', help='Enable Automatic Mixed Precision (default: False)')
+    parser.add_argument('--no-amp', action='store_true', dest='no_amp', help='Disable Automatic Mixed Precision')
+    parser.add_argument('--patience', type=int, default=None, help='Override early stopping patience for all experiments')
+    parser.add_argument('--epochs', type=int, default=None, help='Override number of epochs for all experiments')
     
     args = parser.parse_args()
     
     runner = BenchmarkRunner(
         output_dir=args.output_dir,
         pilot=args.pilot,
-        amp=args.amp,
+        amp=not args.no_amp,  # AMP enabled by default
+        patience=args.patience,
+        epochs=args.epochs,
     )
     
     runner.run_all(domains=args.domains, resume=args.resume)

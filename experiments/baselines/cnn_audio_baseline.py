@@ -90,6 +90,8 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=30)
     parser.add_argument('--lr', type=float, default=1e-2) # M5 usually needs higher LR
     parser.add_argument('--weight_decay', type=float, default=0.0001) # M5 uses reduced weight decay
+    parser.add_argument('--patience', type=int, default=10, help='Early stopping patience (for compatibility)')
+    parser.add_argument('--amp', action='store_true', help='Use Automatic Mixed Precision')
     
     # Output
     parser.add_argument('--output_dir', type=str, default='outputs/baselines/audio')

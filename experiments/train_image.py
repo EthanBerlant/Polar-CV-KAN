@@ -16,7 +16,7 @@ from datetime import datetime
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim import AdamW
+from torch.optim import AdamW, Adam, SGD
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 
 # Add src to path
@@ -82,18 +82,21 @@ def parse_args():
     parser.add_argument('--d_complex', type=int, default=64)
     parser.add_argument('--n_layers', type=int, default=6)
     parser.add_argument('--kan_hidden', type=int, default=32)
-    parser.add_argument('--aggregation', type=str, default='local', choices=['global', 'local'])
     parser.add_argument('--pos_encoding', type=str, default='sinusoidal', choices=['sinusoidal', 'learnable'])
+    parser.add_argument('--pooling', type=str, default='mean', choices=['mean', 'max', 'attention'])
+    parser.add_argument('--embedding', type=str, default='standard', choices=['standard', 'deep'])
     
     # Training args
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--weight_decay', type=float, default=0.05)
+    parser.add_argument('--optimizer', type=str, default='adamw', choices=['adam', 'adamw', 'sgd'], help='Optimizer to use')
     parser.add_argument('--warmup_epochs', type=int, default=5)
     
     # New args
     parser.add_argument('--patience', type=int, default=10, help='Early stopping patience')
     parser.add_argument('--amp', action='store_true', help='Use Automatic Mixed Precision')
+    parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume from (e.g., outputs/image/run_name)')
     
     # Output
     parser.add_argument('--output_dir', type=str, default='outputs/image')
@@ -155,16 +158,39 @@ def main():
         n_layers=args.n_layers,
         n_classes=n_classes,
         kan_hidden=args.kan_hidden,
-        aggregation=args.aggregation,
         pos_encoding=args.pos_encoding,
+        pooling=args.pooling,
+        embedding_type=args.embedding,
     ).to(device)
     
     n_params = count_parameters(model)
     print(f"Model parameters: {n_params:,}")
     
     # Optimizer and scheduler
-    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    if args.optimizer == 'adam':
+        optimizer = Adam(model.parameters(), lr=args.lr)
+    elif args.optimizer == 'sgd':
+        optimizer = SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
+    else:
+        optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=args.epochs, T_mult=1)
+    
+    # Resume from checkpoint if specified
+    start_epoch = 0
+    if args.resume:
+        resume_path = Path(args.resume)
+        checkpoint_file = resume_path / 'best.pt'
+        if checkpoint_file.exists():
+            print(f"Resuming from {checkpoint_file}")
+            checkpoint = torch.load(checkpoint_file, map_location=device, weights_only=False)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            if 'optimizer_state_dict' in checkpoint:
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            if 'epoch' in checkpoint:
+                start_epoch = checkpoint['epoch']
+                print(f"Resuming from epoch {start_epoch}")
+        else:
+            print(f"Warning: No checkpoint found at {checkpoint_file}, starting fresh")
     
     # Trainer
     trainer = ImageTrainer(
