@@ -70,7 +70,7 @@ class BenchmarkRunner:
         "image": {
             "epochs": 50,
             "patience": 10,
-            "script": "experiments/train_image.py",
+            "script": "experiments/train.py",
             "baseline_script": "experiments/baselines/vit_baseline.py",
             "pilot_epochs": 5,
             "pilot_subset": 1000,
@@ -79,7 +79,7 @@ class BenchmarkRunner:
         "timeseries": {
             "epochs": 30,
             "patience": 10,
-            "script": "experiments/train_timeseries.py",
+            "script": "experiments/train.py",
             "baseline_script": "experiments/baselines/lstm_baseline.py",
             "pilot_epochs": 3,
             "pilot_subset": None,
@@ -88,7 +88,7 @@ class BenchmarkRunner:
         "audio": {
             "epochs": 20,
             "patience": 10,
-            "script": "experiments/train_audio.py",
+            "script": "experiments/train.py",
             "baseline_script": "experiments/baselines/cnn_audio_baseline.py",
             "pilot_epochs": 2,
             "pilot_subset": 500,
@@ -266,21 +266,30 @@ class BenchmarkRunner:
         cmd = [
             sys.executable,
             script,
-            "--epochs",
-            str(config.epochs),
-            "--patience",
-            str(config.patience),
-            "--d_complex",
-            str(config.d_complex),
-            "--n_layers",
-            str(config.n_layers),
-            "--seed",
-            str(config.seed),
-            "--run_name",
-            config.run_name,
-            "--output_dir",
-            str(self.output_dir / config.domain),
         ]
+
+        # Add --domain flag for CV-KAN models (using unified train.py)
+        if config.model_type != "baseline":
+            cmd.extend(["--domain", config.domain])
+
+        cmd.extend(
+            [
+                "--epochs",
+                str(config.epochs),
+                "--patience",
+                str(config.patience),
+                "--d_complex",
+                str(config.d_complex),
+                "--n_layers",
+                str(config.n_layers),
+                "--seed",
+                str(config.seed),
+                "--run_name",
+                config.run_name,
+                "--output_dir",
+                str(self.output_dir / config.domain),
+            ]
+        )
 
         if config.amp:
             cmd.append("--amp")
