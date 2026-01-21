@@ -1,3 +1,5 @@
+import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -79,12 +81,23 @@ class BaseTrainer:
         """Implement domain-specific validation logic."""
         raise NotImplementedError
 
-    def train_epoch(self, dataloader, epoch) -> dict[str, float]:
+    def train_epoch(self, dataloader, epoch, metric_name="metric") -> dict[str, float]:
         self.model.train()
         total_metrics = {}
         n_batches = 0
 
-        pbar = tqdm(dataloader, desc=f"Train Epoch {epoch}")
+        # Format best metric for display
+        best_val = self.best_val_metric
+        if best_val in [float("inf"), float("-inf")]:
+            best_str = "init"
+        else:
+            best_str = f"{best_val:.2f}"
+
+        pbar = tqdm(
+            dataloader,
+            desc=f"E{epoch}/{self.args.epochs} best_{metric_name}={best_str}",
+            leave=False,
+        )
         for batch in pbar:
             # Move batch to device is handled in train_step usually,
             # but let's leave it to implementations or do it here if standard.
@@ -158,33 +171,55 @@ class BaseTrainer:
         early_stopper = EarlyStopper(patience=patience, mode=self.args.metric_mode)
         start_time = time.time()
 
-        print(f"Starting training with patience={patience}, amp={self.use_amp}")
+        # Build config string for line 1
+        prog = os.environ.get("BENCHMARK_PROG", "")
+        prefix = f"[{prog}] " if prog else ""
+
+        config_str = (
+            f"{prefix}[{self.args.domain.upper()}] d={self.args.d_complex} L={self.args.n_layers}"
+        )
+        if hasattr(self.args, "embedding_type"):
+            config_str += f" emb={self.args.embedding_type}"
+        config_str += f" seed={self.args.seed}"
+
+        # Initial header print
+        print(f"\n{config_str}")
 
         for epoch in range(1, epochs + 1):
             epoch_start = time.time()
 
-            train_metrics = self.train_epoch(train_loader, epoch)
+            # Train and measure speed
+            train_start = time.time()
+            train_metrics = self.train_epoch(train_loader, epoch, metric_name)
+            train_duration = time.time() - train_start
+            train_speed = len(train_loader) / train_duration if train_duration > 0 else 0
+            train_loss = train_metrics.get("loss", 0)
+
+            # Format best metric for display
+            best_val = self.best_val_metric
+            if best_val in [float("inf"), float("-inf")]:
+                best_str = "init"
+            else:
+                best_str = f"{best_val:.2f}"
+
+            # Show validation status with persistent stats
+            # Overwrites the completed tqdm bar
+            status = f"  E{epoch}/{epochs} best_{metric_name}={best_str} loss={train_loss:.3f} speed={train_speed:.1f}it/s Validating..."
+            sys.stdout.write(f"\r{status:<100}")
+            sys.stdout.flush()
+
             val_metrics = self.evaluate(val_loader)
 
             if self.scheduler:
-                # Handle different scheduler types
                 if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                     self.scheduler.step(val_metrics[metric_name])
                 else:
                     self.scheduler.step()
 
             epoch_time = time.time() - epoch_start
-
-            # Print status
-            train_str = ", ".join([f"{k}: {v:.4f}" for k, v in train_metrics.items()])
-            val_str = ", ".join([f"{k}: {v:.4f}" for k, v in val_metrics.items()])
-            print(
-                f"Epoch {epoch}/{epochs} ({epoch_time:.1f}s) - Train [{train_str}] - Val [{val_str}]"
-            )
-
             current_lr = self.optimizer.param_groups[0]["lr"]
 
-            # Save history
+            # Track history
             self.history.append(
                 {
                     "epoch": epoch,
@@ -217,23 +252,33 @@ class BaseTrainer:
                     },
                     self.output_dir / "best.pt",
                 )
-                print(f"  -> Saved best model ({metric_name}: {val_score:.4f})")
 
-            # Periodic save
-            if epoch % self.args.save_every == 0:
-                torch.save(
-                    {
-                        "epoch": epoch,
-                        "model_state_dict": self.model.state_dict(),
-                        "history": self.history,
-                    },
-                    self.output_dir / f"checkpoint_{epoch}.pt",
-                )
+            # Print epoch status (Line 2) - Move speed here, avoid updating Line 1 with ANSI
+            train_loss = train_metrics.get("loss", 0)
+            best_disp = (
+                self.best_val_metric
+                if self.best_val_metric not in [float("inf"), float("-inf")]
+                else val_score
+            )
+            mark = "✓" if is_best else " "
+            progress = f"  E{epoch}/{epochs} best_{metric_name}={best_disp:.2f} loss={train_loss:.3f} val={val_score:.2f} speed={train_speed:.1f}it/s {mark}"
+            sys.stdout.write(f"\r{progress:<100}")
+            sys.stdout.flush()
 
             # Early stopping
             if early_stopper(val_score):
-                print(f"Early stopping triggered at epoch {epoch}")
                 break
 
         total_time = time.time() - start_time
+
+        # Final output: print line 1 with final results (overwrites progress line)
+        final_best = (
+            f"{self.best_val_metric:.2f}"
+            if self.best_val_metric not in [float("inf"), float("-inf")]
+            else "N/A"
+        )
+        final_line = f"{config_str} | best_{metric_name}={final_best} ({total_time:.0f}s)"
+        sys.stdout.write(f"\r{final_line:<100}\n")
+        sys.stdout.flush()
+
         return self.history, total_time

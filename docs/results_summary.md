@@ -87,3 +87,124 @@ Following the ablation study, we implemented **ComplexRMSNorm** and **PhaseAtten
 | Transformer Baseline | ~95% | ~79% | 961k | Real-valued attention |
 
 **Conclusion**: The user's hypothesis was correct: normalization suppresses the "polarization" (magnitude) signal. By removing it, **CV-KAN achieves state-of-the-art performance (81.6%)**, beating the Transformer baseline.
+
+---
+
+## 6. Experimental Design History
+
+This section documents the original experimental protocol and implementation approaches that led to the results above.
+
+### 6.1 Experimental Protocol
+
+The experiments followed a staged validation approach:
+
+| Stage | Task | Purpose |
+|-------|------|---------|
+| **Stage 1** | Synthetic signal/noise classification | Validate phase coherence and magnitude separation |
+| **Stage 2** | Multi-class signal detection | Compare multi-head approaches A, B, C |
+| **Stage 3** | Real task (SST-2) | Compare against matched-compute Transformer |
+| **Stage 4** | Diagnostics | Visualize phase/magnitude distributions, ablations |
+
+### 6.2 Multi-Head Approach Implementations
+
+Three approaches were implemented and tested:
+
+#### Approach A: Emergent Heads via Channel Diversity (Winner)
+
+The simplest approach—just use `d > 1` complex dimensions. Each dimension evolves independently; heads are implicit.
+
+```python
+# Diversity encouragement (soft regularization)
+phase_matrix = torch.angle(Z)  # (batch, n_tokens, d)
+phase_corr = corrcoef(phase_matrix.reshape(-1, d).T)
+diversity_loss = (phase_corr.triu(1) ** 2).mean()
+```
+
+**Why it won**: Zero structural complexity. The network naturally learns diverse phase patterns.
+
+#### Approach B: Explicit Phase Offsets
+
+Initialize different dimensions with fixed reference phases (like beamforming).
+
+```python
+class MultiHeadPolarizing(nn.Module):
+    def __init__(self, n_heads, d_per_head):
+        super().__init__()
+        # Fixed phase offsets: 0, 2π/H, 4π/H, ...
+        offsets = torch.arange(n_heads) * (2 * math.pi / n_heads)
+        self.register_buffer('phase_offsets', offsets)
+        self.polarizer = PolarizingBlock(d_per_head)  # shared
+
+    def forward(self, Z):  # Z: (batch, n_tokens, n_heads, d_per_head)
+        Z_rotated = Z * torch.exp(1j * self.phase_offsets[None, None, :, None])
+        out = self.polarizer(Z_rotated.flatten(2, 3)).unflatten(-1, (self.n_heads, -1))
+        return out * torch.exp(-1j * self.phase_offsets[None, None, :, None])
+```
+
+**Why it lost**: Effective but less flexible than learned patterns. The fixed offsets constrain the representational space.
+
+#### Approach C: Factored Magnitude-Phase Heads
+
+Separate "what to select" (phase) from "how much" (magnitude) across heads.
+
+```python
+class FactoredHeads(nn.Module):
+    def __init__(self, n_heads, d_model):
+        super().__init__()
+        self.phase_projections = nn.Parameter(torch.randn(n_heads, d_model, d_model) * 0.02)
+        self.shared_mag_transform = PolarizingMagnitude(d_model)
+
+    def forward(self, Z):
+        Z_heads = torch.einsum('btn d, h d e -> btn h e', Z, self.phase_projections)
+        mags = self.shared_mag_transform(torch.abs(Z_heads))
+        phases = torch.angle(Z_heads)
+        return mags * torch.exp(1j * phases)
+```
+
+**Why it lost**: The factorization was too restrictive. Coupling phase and magnitude processing outperformed decoupling.
+
+### 6.3 Stability Mechanisms Explored
+
+#### ComplexLayerNorm (Counterproductive)
+
+```python
+class ComplexLayerNorm(nn.Module):
+    def forward(self, Z):
+        log_mag = torch.log(torch.abs(Z) + 1e-6)
+        log_mag_norm = (log_mag - log_mag.mean(dim=-1, keepdim=True)) / (log_mag.std(dim=-1, keepdim=True) + 1e-6)
+        phase = torch.angle(Z)
+        return torch.exp(log_mag_norm) * torch.exp(1j * phase)
+```
+
+> [!WARNING]
+> **Finding**: Magnitude normalization directly contradicts polarization. Normalizing destroys the attention signal. Best results with `norm_type='none'`.
+
+#### GatedPolarization (Useful)
+
+Control polarization aggressiveness via a learnable gate:
+
+```python
+class GatedPolarization(nn.Module):
+    def __init__(self):
+        self.polarization_strength = nn.Parameter(torch.tensor(0.0))  # starts at identity
+
+    def forward(self, mag):
+        alpha = torch.sigmoid(self.polarization_strength)
+        mag_polarized = self.polarize(mag)
+        return (1 - alpha) * mag + alpha * mag_polarized
+```
+
+**Finding**: Network learns how much polarization it needs. Starts linear, becomes nonlinear if helpful.
+
+#### Phase Anchoring (Not Effective)
+
+Soft attraction to canonical angles (0, π/2, π, 3π/2):
+
+```python
+def phase_anchor_loss(phase, n_anchors=4):
+    anchors = torch.arange(n_anchors) * (2 * math.pi / n_anchors)
+    distances = torch.abs(phase.unsqueeze(-1) - anchors)
+    return distances.min(dim=-1).values.mean()
+```
+
+**Finding**: Not effective in practice. Free phase evolution outperformed anchored phases.

@@ -92,11 +92,44 @@ def pad_sequence(batch):
     return torch.stack(padded_waveforms), labels
 
 
+class SpeechCommandsCollate:
+    def __init__(self, label_to_index):
+        self.label_to_index = label_to_index
+
+    def __call__(self, batch):
+        tensors, targets = [], []
+
+        # Determine max length in this batch for padding
+        max_len = 0
+        for waveform, _, _label, *_ in batch:
+            max_len = max(max_len, waveform.size(1))
+
+        for waveform, _, label, *_ in batch:
+            # Pad
+            if waveform.size(1) < max_len:
+                padding = max_len - waveform.size(1)
+                waveform = torch.nn.functional.pad(waveform, (0, padding))
+
+            tensors += [waveform]
+            targets += [torch.tensor(self.label_to_index[label])]
+
+        tensors = torch.stack(tensors)
+
+        # Optional: Transform to Spectrogram here or in model.
+        # The plan says "use_stft_frontend: True" in model, implying model takes waveform or STFT.
+        # CVKANAudio doc says it takes waveform or spectrogram.
+        # We'll return raw waveform and let model handle it or specific training script handle it.
+
+        targets = torch.stack(targets)
+        return tensors, targets
+
+
 def create_audio_dataloader(
     root: str = "./data/speech_commands",
     batch_size: int = 64,
     subset_size: int = None,
     download: bool = True,
+    num_workers: int = 2,
 ):
     if not TORCHAUDIO_AVAILABLE:
         raise ImportError("torchaudio is required for audio benchmarking.")
@@ -115,35 +148,16 @@ def create_audio_dataloader(
         raise e
 
     # Create label map
-    labels = sorted(list(set(datapoint[2] for datapoint in train_set)))
+    # Convert subset to list to safely iterate multiple times if needed, though Set should be fine.
+    # The error came from "set(datapoint[2]...)" failing inside sorted().
+    # Let's iterate explicitly to debug or be safe.
+    all_labels = set()
+    for i in range(len(train_set)):
+        _, _, label, *_ = train_set[i]
+        all_labels.add(label)
+
+    labels = sorted(list(all_labels))
     label_to_index = {label: index for index, label in enumerate(labels)}
-
-    def collate_fn(batch):
-        tensors, targets = [], []
-
-        # Determine max length in this batch for padding
-        max_len = 0
-        for waveform, _, _label, *_ in batch:
-            max_len = max(max_len, waveform.size(1))
-
-        for waveform, _, label, *_ in batch:
-            # Pad
-            if waveform.size(1) < max_len:
-                padding = max_len - waveform.size(1)
-                waveform = torch.nn.functional.pad(waveform, (0, padding))
-
-            tensors += [waveform]
-            targets += [torch.tensor(label_to_index[label])]
-
-        tensors = torch.stack(tensors)
-
-        # Optional: Transform to Spectrogram here or in model.
-        # The plan says "use_stft_frontend: True" in model, implying model takes waveform or STFT.
-        # CVKANAudio doc says it takes waveform or spectrogram.
-        # We'll return raw waveform and let model handle it or specific training script handle it.
-
-        targets = torch.stack(targets)
-        return tensors, targets
 
     if subset_size:
         indices = torch.randperm(len(train_set))[:subset_size]
@@ -156,7 +170,10 @@ def create_audio_dataloader(
         test_set = Subset(test_set, indices)
 
     # Use num_workers for parallel loading (2 is safe on Windows)
-    n_workers = 2 if sys.platform != "win32" else 0  # Windows often has multiprocessing issues
+    # n_workers = 2 if sys.platform != "win32" else 0  # Windows often has multiprocessing issues
+    n_workers = num_workers
+
+    collate_fn = SpeechCommandsCollate(label_to_index)
 
     train_loader = DataLoader(
         train_set,
@@ -282,12 +299,26 @@ class UrbanSound8KDataset(torch.utils.data.Dataset):
         return waveform, sample["label"]
 
 
+def urbansound8k_collate_fn(batch):
+    waveforms, labels = zip(*batch, strict=False)
+    max_len = max(w.size(1) for w in waveforms)
+
+    padded = []
+    for w in waveforms:
+        if w.size(1) < max_len:
+            w = F.pad(w, (0, max_len - w.size(1)))
+        padded.append(w)
+
+    return torch.stack(padded), torch.tensor(labels)
+
+
 def create_urbansound8k_dataloader(
     root: str = "./data/urbansound8k",
     batch_size: int = 64,
     test_fold: int = 10,
     subset_size: int = None,
     download: bool = False,
+    num_workers: int = 2,
 ):
     """
     Create UrbanSound8K dataloaders using 10-fold cross-validation.
@@ -330,26 +361,26 @@ def create_urbansound8k_dataloader(
         val_set.samples = val_set.samples[: subset_size // 10]
         test_set.samples = test_set.samples[: subset_size // 10]
 
-    def collate_fn(batch):
-        waveforms, labels = zip(*batch, strict=False)
-        max_len = max(w.size(1) for w in waveforms)
-
-        padded = []
-        for w in waveforms:
-            if w.size(1) < max_len:
-                w = F.pad(w, (0, max_len - w.size(1)))
-            padded.append(w)
-
-        return torch.stack(padded), torch.tensor(labels)
-
     train_loader = DataLoader(
-        train_set, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, num_workers=0
+        train_set,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=urbansound8k_collate_fn,
+        num_workers=num_workers,
     )
     val_loader = DataLoader(
-        val_set, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=0
+        val_set,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=urbansound8k_collate_fn,
+        num_workers=num_workers,
     )
     test_loader = DataLoader(
-        test_set, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=0
+        test_set,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=urbansound8k_collate_fn,
+        num_workers=num_workers,
     )
 
     return train_loader, val_loader, test_loader, 10
@@ -446,12 +477,26 @@ class ESC50Dataset(torch.utils.data.Dataset):
         return waveform, sample["label"]
 
 
+def esc50_collate_fn(batch):
+    waveforms, labels = zip(*batch, strict=False)
+    max_len = max(w.size(1) for w in waveforms)
+
+    padded = []
+    for w in waveforms:
+        if w.size(1) < max_len:
+            w = torch.nn.functional.pad(w, (0, max_len - w.size(1)))
+        padded.append(w)
+
+    return torch.stack(padded), torch.tensor(labels)
+
+
 def create_esc50_dataloader(
     root: str = "./data/esc50",
     batch_size: int = 64,
     test_fold: int = 5,
     subset_size: int = None,
     download: bool = True,
+    num_workers: int = 2,
 ):
     """
     Create ESC-50 dataloaders using 5-fold cross-validation.
@@ -491,26 +536,26 @@ def create_esc50_dataloader(
         val_set.samples = val_set.samples[: subset_size // 10]
         test_set.samples = test_set.samples[: subset_size // 10]
 
-    def collate_fn(batch):
-        waveforms, labels = zip(*batch, strict=False)
-        max_len = max(w.size(1) for w in waveforms)
-
-        padded = []
-        for w in waveforms:
-            if w.size(1) < max_len:
-                w = torch.nn.functional.pad(w, (0, max_len - w.size(1)))
-            padded.append(w)
-
-        return torch.stack(padded), torch.tensor(labels)
-
     train_loader = DataLoader(
-        train_set, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, num_workers=0
+        train_set,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=esc50_collate_fn,
+        num_workers=num_workers,
     )
     val_loader = DataLoader(
-        val_set, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=0
+        val_set,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=esc50_collate_fn,
+        num_workers=num_workers,
     )
     test_loader = DataLoader(
-        test_set, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=0
+        test_set,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=esc50_collate_fn,
+        num_workers=num_workers,
     )
 
     return train_loader, val_loader, test_loader, 50

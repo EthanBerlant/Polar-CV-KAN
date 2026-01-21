@@ -1,248 +1,166 @@
-"""
-Unified training script for all CV-KAN domains.
-
-Usage:
-    python experiments/train.py --domain image --epochs 100
-    python experiments/train.py --domain audio --d_complex 128
-    python experiments/train.py --domain timeseries --pred_len 96
-    python experiments/train.py --domain sst2 --n_layers 2
-    python experiments/train.py --domain synthetic --task token
-"""
-
 import argparse
-import json
+import os
 import sys
-from datetime import datetime
+from dataclasses import asdict
+from importlib import import_module
 from pathlib import Path
 
-import numpy as np
 import torch
-from torch.optim import SGD, Adam, AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
 
-# Add parent to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add project root to path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from domains import DOMAINS
-
+from src.configs import TrainingConfig, get_preset
 from src.tracking import ExperimentTracker
 
 
-def add_common_args(parser):
-    """Add arguments shared across all domains."""
-    # Model
-    parser.add_argument("--d_complex", type=int, default=64, help="Model width")
-    parser.add_argument("--n_layers", type=int, default=6)
-    parser.add_argument("--kan_hidden", type=int, default=32)
-    parser.add_argument("--pooling", type=str, default="mean", choices=["mean", "max", "attention"])
-    parser.add_argument(
-        "--pos_encoding",
-        type=str,
-        default="sinusoidal",
-        choices=["sinusoidal", "learnable", "none"],
-    )
-    parser.add_argument("--dropout", type=float, default=0.0)
-
-    # Training
-    parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight_decay", type=float, default=0.01)
-    parser.add_argument("--optimizer", type=str, default="adamw", choices=["adam", "adamw", "sgd"])
-    parser.add_argument("--batch_size", type=int, default=128)
-
-    # Control
-    parser.add_argument("--patience", type=int, default=10)
-    parser.add_argument("--amp", action="store_true", help="Mixed precision")
-    parser.add_argument("--save_every", type=int, default=20)
-    parser.add_argument("--subset_size", type=int, default=None, help="Use subset for pilot runs")
-
-    # Reproducibility
-    parser.add_argument("--seed", type=int, default=42)
-
-    # Output
-    parser.add_argument("--output_dir", type=str, default="outputs")
-    parser.add_argument("--run_name", type=str, default=None)
-    parser.add_argument("--experiment_name", type=str, default=None, help="MLflow experiment name")
-
-    return parser
-
-
-def parse_args():
-    """Parse command line arguments."""
-    # First pass: get domain to load domain-specific args
-    pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument(
-        "--domain", type=str, required=True, choices=list(DOMAINS.keys()), help="Training domain"
-    )
-    pre_args, _ = pre_parser.parse_known_args()
-
-    # Get domain config
-    domain_config = DOMAINS[pre_args.domain]
-
-    # Full parser
-    parser = argparse.ArgumentParser(
-        description=f"Train CV-KAN on {pre_args.domain}",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument("--domain", type=str, required=True, choices=list(DOMAINS.keys()))
-
-    # Common args
-    parser = add_common_args(parser)
-
-    # Domain-specific args
-    parser = domain_config["add_args"](parser)
-
-    # Apply domain defaults
-    parser.set_defaults(**domain_config["defaults"])
-
-    args = parser.parse_args()
-
-    # Set metric mode from domain defaults
-    args.metric_name = domain_config["defaults"].get("metric_name", "accuracy")
-    args.metric_mode = domain_config["defaults"].get("metric_mode", "max")
-
-    return args
-
-
-def set_seed(seed):
-    """Set random seeds for reproducibility."""
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-
-
-def count_parameters(model):
-    """Count trainable parameters."""
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+def load_domain_module(domain_name):
+    # Mapping friendly names to module paths
+    # Assuming valid domains are in experiments/domains/
+    return import_module(f"experiments.domains.{domain_name}")
 
 
 def main():
-    args = parse_args()
-    set_seed(args.seed)
+    parser = argparse.ArgumentParser(description="Deep Refactor Trainer")
+    parser.add_argument(
+        "--domain", type=str, required=True, help="Domain name (nlp, image, audio, etc)"
+    )
+    parser.add_argument("--preset", type=str, help="Preset name (e.g., sst2, cifar10)")
+    parser.add_argument("--config", type=str, help="Path to custom config yaml")
+    parser.add_argument("--output_dir", type=str, default="./outputs")
+    parser.add_argument("--epochs", type=int, help="Override epochs")
+    parser.add_argument("--batch_size", type=int, help="Override batch size")
 
-    # Device
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Domain: {args.domain}")
-    print(f"Device: {device}")
+    # Model config overrides
+    parser.add_argument("--d_complex", type=int, help="Override d_complex")
+    parser.add_argument("--n_layers", type=int, help="Override n_layers")
+    parser.add_argument("--kan_hidden", type=int, help="Override kan_hidden")
+    parser.add_argument("--run_name", type=str, help="Override run name")
+    parser.add_argument("--pooling", type=str, help="Override pooling")
+    parser.add_argument("--dropout", type=float, help="Override dropout")
+    parser.add_argument("--embedding_type", type=str, help="Override embedding_type (image only)")
 
-    # Output directory
-    run_name = args.run_name or f"{args.domain}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    output_dir = Path(args.output_dir) / args.domain / run_name
-    output_dir.mkdir(parents=True, exist_ok=True)
+    parser.add_argument("--subset_size", type=int, help="Limit dataset size")
+    parser.add_argument("--patience", type=int, help="Early stopping patience")
+    parser.add_argument("--seed", type=int, help="Random seed")
 
-    # Save config
-    with open(output_dir / "config.json", "w") as f:
-        json.dump(vars(args), f, indent=2)
+    args = parser.parse_args()
 
-    # Get domain config
-    domain_config = DOMAINS[args.domain]
-
-    # Create dataloaders
-    print("Loading data...")
-    train_loader, val_loader, test_loader, data_info = domain_config["create_dataloaders"](args)
-    print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
-
-    # Update args with data info (e.g., vocab_size, n_classes)
-    for key, value in data_info.items():
-        setattr(args, key, value)
-
-    # Create model
-    print("Creating model...")
-    model = domain_config["create_model"](args).to(device)
-    n_params = count_parameters(model)
-    print(f"Parameters: {n_params:,}")
-
-    # Optimizer
-    if args.optimizer == "adam":
-        optimizer = Adam(model.parameters(), lr=args.lr)
-    elif args.optimizer == "sgd":
-        optimizer = SGD(
-            model.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.weight_decay
-        )
+    # 1. Load Configuration
+    if args.preset:
+        model_config = get_preset(args.preset)
+        print(f"Loaded preset: {args.preset}")
     else:
-        optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        # Default fallback or error
+        raise ValueError("Please provide --preset (config file loading not fully impl yet)")
 
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
+    # Apply overrides
+    if args.d_complex:
+        model_config.d_complex = args.d_complex
+    if args.n_layers:
+        model_config.n_layers = args.n_layers
+    if args.kan_hidden:
+        model_config.kan_hidden = args.kan_hidden
+    if args.pooling:
+        model_config.pooling = args.pooling
+    if args.dropout is not None:
+        model_config.dropout = args.dropout
+    if args.embedding_type and hasattr(model_config, "embedding_type"):
+        model_config.embedding_type = args.embedding_type
 
-    # Trainer
-    TrainerClass = domain_config["trainer"]
+    # Training config
+    train_config = TrainingConfig(
+        output_dir=args.output_dir,
+        epochs=args.epochs if args.epochs else 50,
+        batch_size=args.batch_size if args.batch_size else 32,
+        subset_size=args.subset_size,
+        patience=args.patience if args.patience else 10,
+        seed=args.seed if args.seed else 42,
+    )
+
+    # 2. Load Domain Module
+    domain = load_domain_module(args.domain)
+
+    # 3. Create DataLoaders
+    # Adapters should accept config and return loaders + updated config (e.g. n_classes)
+    # But updated config might mismatch dataclass if we add fields?
+    # We expect adapters to modify the passed config object or return metadata.
+
+    print("Creating dataloaders...")
+    train_loader, val_loader, test_loader, meta = domain.create_dataloaders(
+        model_config, train_config
+    )
+
+    # Update config from metadata
+    if "n_classes" in meta:
+        model_config.n_classes = meta["n_classes"]
+    if "vocab_size" in meta and hasattr(model_config, "vocab_size"):
+        model_config.vocab_size = meta["vocab_size"]
+    # Add other dynamic meta if needed
+
+    # 4. Create Model
+    print(f"Creating model for {args.domain}...")
+    model = domain.create_model(model_config)
+
+    # 5. Setup Trainer
+    # Domain module can provide a specific Trainer class or we use generic
+    TrainerClass = getattr(domain, "Trainer", None)
+    if TrainerClass is None:
+        # Fallback to generic Trainer if possible, or import from src.trainer
+        from src.trainer import BaseTrainer
+
+        TrainerClass = BaseTrainer
+
+    tracker = ExperimentTracker(
+        experiment_name=f"cvkan_{args.domain}",
+        run_name=args.run_name or args.preset or "custom_run",
+    )
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = model.to(device)
+
+    # create optimizer
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=train_config.lr, weight_decay=train_config.weight_decay
+    )
+
+    # create scheduler (simple placeholder)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode=train_config.metric_mode, patience=train_config.patience // 2
+    )
+
+    # Update args for BaseTrainer (it expects generic args object)
+    # We mix training config and model config for logging
+    combined_args = argparse.Namespace(**asdict(train_config))
+    for k, v in asdict(model_config).items():
+        setattr(combined_args, k, v)
+    combined_args.domain = args.domain
+
     trainer = TrainerClass(
         model=model,
         optimizer=optimizer,
         scheduler=scheduler,
         device=device,
-        output_dir=output_dir,
-        args=args,
-        use_amp=args.amp,
+        output_dir=Path(train_config.output_dir),
+        args=combined_args,
+        use_amp=train_config.amp,
     )
 
-    # MLflow tracking
-    experiment_name = args.experiment_name or f"cvkan-{args.domain}"
+    # 6. Train
+    print("Starting training...")
+    with tracker:
+        tracker.log_params(asdict(model_config))
+        tracker.log_params(asdict(train_config))
 
-    with ExperimentTracker(experiment_name, run_name=run_name) as tracker:
-        # Log hyperparameters
-        tracker.log_params(
-            {
-                "domain": args.domain,
-                "d_complex": args.d_complex,
-                "n_layers": args.n_layers,
-                "epochs": args.epochs,
-                "batch_size": args.batch_size,
-                "lr": args.lr,
-                "pooling": args.pooling,
-                "params": n_params,
-            }
-        )
-
-        # Training
-        print("\nStarting training...")
-        history, total_time = trainer.fit(
+        history, train_time = trainer.fit(
             train_loader=train_loader,
             val_loader=val_loader,
-            epochs=args.epochs,
-            patience=args.patience,
-            metric_name=args.metric_name,
+            epochs=train_config.epochs,
+            patience=train_config.patience,
+            metric_name=train_config.metric_name,
         )
 
-        # Log epoch metrics
-        for record in history:
-            epoch = record["epoch"]
-            tracker.log_metrics({f"train_{k}": v for k, v in record["train"].items()}, step=epoch)
-            tracker.log_metrics({f"val_{k}": v for k, v in record["val"].items()}, step=epoch)
-
-        # Final evaluation
-        print("\nEvaluating on test set...")
-        test_results = trainer.evaluate(test_loader)
-        test_str = ", ".join([f"{k}: {v:.4f}" for k, v in test_results.items()])
-        print(f"Test results: {test_str}")
-
-        # Log final metrics
-        tracker.log_metrics({f"test_{k}": v for k, v in test_results.items()})
-        tracker.log_metrics({f"best_val_{args.metric_name}": trainer.best_val_metric})
-
-        # Save model
-        tracker.log_model(model, name="best_model")
-
-        print(f"\nTraining complete! Total time: {total_time/3600:.2f} hours")
-        print(f"Best val {args.metric_name}: {trainer.best_val_metric:.4f}")
-        print(f"Results saved to {output_dir}")
-        print(f"MLflow run: {tracker.run_id}")
-
-    # Save final results
-    results = {
-        "domain": args.domain,
-        "n_params": n_params,
-        f"best_val_{args.metric_name}": trainer.best_val_metric,
-        "test_results": test_results,
-        "total_time_seconds": total_time,
-        "history": history,
-        "config": vars(args),
-    }
-
-    with open(output_dir / "results.json", "w") as f:
-        json.dump(results, f, indent=2, default=str)
-
-    return results
+        tracker.log_metrics({"train_time": train_time})
 
 
 if __name__ == "__main__":

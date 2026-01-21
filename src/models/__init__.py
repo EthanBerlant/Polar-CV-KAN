@@ -5,6 +5,7 @@ from .baseline_transformer import BaselineTransformer
 from .cv_kan import CVKAN, CVKANTokenClassifier
 from .cv_kan_audio import CVKANAudio
 from .cv_kan_image import CVKANImageClassifier
+from .cv_kan_nlp import CVKANNLP
 from .cv_kan_timeseries import CVKANTimeSeries
 
 __all__ = [
@@ -19,6 +20,7 @@ __all__ = [
     "CVKANImageClassifier",
     "CVKANTimeSeries",
     "CVKANAudio",
+    "CVKANNLP",
     # Baselines
     "BaselineTransformer",
 ]

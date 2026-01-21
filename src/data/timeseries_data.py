@@ -15,6 +15,7 @@ class ETTh1Dataset(Dataset):
         root: str = "./data/ETT",
         flag: str = "train",
         size: int = None,
+        subset_size: int = None,
         features: str = "M",
         target: str = "OT",
         scale: bool = True,
@@ -43,6 +44,7 @@ class ETTh1Dataset(Dataset):
         if download:
             self.download()
 
+        self.subset_size = subset_size
         self.__read_data__()
 
     def download(self):
@@ -86,6 +88,10 @@ class ETTh1Dataset(Dataset):
         self.data_x = data[border1:border2]
         self.data_y = data[border1:border2]
 
+        if self.subset_size:
+            self.data_x = self.data_x[: self.subset_size]
+            self.data_y = self.data_y[: self.subset_size]
+
     def __getitem__(self, index):
         s_begin = index
         s_end = s_begin + self.seq_len
@@ -110,6 +116,7 @@ def create_timeseries_dataloader(
     seq_len: int = 96,
     pred_len: int = 96,
     num_workers: int = 0,
+    subset_size: int = None,
 ):
     train_set = ETTh1Dataset(
         root=root,
@@ -119,6 +126,7 @@ def create_timeseries_dataloader(
         seq_len=seq_len,
         pred_len=pred_len,
         download=True,
+        subset_size=subset_size,
     )
     val_set = ETTh1Dataset(
         root=root,
@@ -128,6 +136,7 @@ def create_timeseries_dataloader(
         seq_len=seq_len,
         pred_len=pred_len,
         download=True,
+        subset_size=subset_size // 10 if subset_size else None,
     )
     test_set = ETTh1Dataset(
         root=root,
@@ -137,6 +146,7 @@ def create_timeseries_dataloader(
         seq_len=seq_len,
         pred_len=pred_len,
         download=True,
+        subset_size=subset_size // 10 if subset_size else None,
     )
 
     train_loader = DataLoader(
@@ -191,6 +201,7 @@ class ETTm1Dataset(Dataset):
         label_len: int = 48,
         pred_len: int = 96,
         download: bool = True,
+        subset_size: int = None,
     ):
         self.seq_len = seq_len
         self.label_len = label_len
@@ -208,6 +219,7 @@ class ETTm1Dataset(Dataset):
 
         if download:
             self.download()
+        self.subset_size = subset_size
         self.__read_data__()
 
     def download(self):
@@ -251,6 +263,10 @@ class ETTm1Dataset(Dataset):
         self.data_x = data[border1:border2]
         self.data_y = data[border1:border2]
 
+        if self.subset_size:
+            self.data_x = self.data_x[: self.subset_size]
+            self.data_y = self.data_y[: self.subset_size]
+
     def __getitem__(self, index):
         s_begin = index
         s_end = s_begin + self.seq_len
@@ -272,11 +288,26 @@ def create_ettm1_dataloader(
     seq_len: int = 96,
     pred_len: int = 96,
     num_workers: int = 0,
+    subset_size: int = None,
 ):
     """Create ETTm1 dataloaders (15-minute granularity)."""
-    train_set = ETTm1Dataset(root=root, flag="train", seq_len=seq_len, pred_len=pred_len)
-    val_set = ETTm1Dataset(root=root, flag="val", seq_len=seq_len, pred_len=pred_len)
-    test_set = ETTm1Dataset(root=root, flag="test", seq_len=seq_len, pred_len=pred_len)
+    train_set = ETTm1Dataset(
+        root=root, flag="train", seq_len=seq_len, pred_len=pred_len, subset_size=subset_size
+    )
+    val_set = ETTm1Dataset(
+        root=root,
+        flag="val",
+        seq_len=seq_len,
+        pred_len=pred_len,
+        subset_size=subset_size // 10 if subset_size else None,
+    )
+    test_set = ETTm1Dataset(
+        root=root,
+        flag="test",
+        seq_len=seq_len,
+        pred_len=pred_len,
+        subset_size=subset_size // 10 if subset_size else None,
+    )
 
     train_loader = DataLoader(
         train_set,
@@ -310,7 +341,8 @@ def create_ettm1_dataloader(
 # Weather Dataset
 # ============================================================================
 
-WEATHER_URL = "https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/weather/weather.csv"
+# WEATHER_URL = "https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/weather/weather.csv" # Broken
+WEATHER_URL = "https://raw.githubusercontent.com/thuml/Autoformer/main/dataset/weather.csv"
 
 
 class WeatherDataset(Dataset):
@@ -331,6 +363,7 @@ class WeatherDataset(Dataset):
         label_len: int = 48,
         pred_len: int = 96,
         download: bool = True,
+        subset_size: int = None,
     ):
         self.seq_len = seq_len
         self.label_len = label_len
@@ -348,6 +381,7 @@ class WeatherDataset(Dataset):
 
         if download:
             self.download()
+        self.subset_size = subset_size
         self.__read_data__()
 
     def download(self):
@@ -391,6 +425,10 @@ class WeatherDataset(Dataset):
         self.data_x = data[border1:border2]
         self.data_y = data[border1:border2]
 
+        if self.subset_size:
+            self.data_x = self.data_x[: self.subset_size]
+            self.data_y = self.data_y[: self.subset_size]
+
     def __getitem__(self, index):
         s_begin = index
         s_end = s_begin + self.seq_len
@@ -412,11 +450,26 @@ def create_weather_dataloader(
     seq_len: int = 96,
     pred_len: int = 96,
     num_workers: int = 0,
+    subset_size: int = None,
 ):
     """Create Weather dataloaders (21 meteorological features)."""
-    train_set = WeatherDataset(root=root, flag="train", seq_len=seq_len, pred_len=pred_len)
-    val_set = WeatherDataset(root=root, flag="val", seq_len=seq_len, pred_len=pred_len)
-    test_set = WeatherDataset(root=root, flag="test", seq_len=seq_len, pred_len=pred_len)
+    train_set = WeatherDataset(
+        root=root, flag="train", seq_len=seq_len, pred_len=pred_len, subset_size=subset_size
+    )
+    val_set = WeatherDataset(
+        root=root,
+        flag="val",
+        seq_len=seq_len,
+        pred_len=pred_len,
+        subset_size=subset_size // 10 if subset_size else None,
+    )
+    test_set = WeatherDataset(
+        root=root,
+        flag="test",
+        seq_len=seq_len,
+        pred_len=pred_len,
+        subset_size=subset_size // 10 if subset_size else None,
+    )
 
     train_loader = DataLoader(
         train_set,

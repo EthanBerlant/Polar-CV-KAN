@@ -20,11 +20,16 @@ The insight: **attention can be viewed as interference**. When tokens "agree," t
 
 ### Why Kolmogorov-Arnold Networks (KAN)?
 
-The Kolmogorov-Arnold representation theorem states that any multivariate continuous function can be decomposed into sums of univariate functions. CV-KAN applies this principle:
+Complex-valued neural networks face a fundamental challenge: **choosing activation functions is difficult**. Every complex activation comes with tradeoffs—Liouville's theorem tells us no bounded holomorphic function is non-constant, so you must sacrifice one desirable property for another.
 
-- Instead of learning weight matrices, we learn **1D transformations** on magnitude and phase
-- These transformations are interpretable: "amplify large magnitudes" or "rotate phases toward alignment"
+KAN sidesteps this entirely. The Kolmogorov-Arnold representation theorem states that any multivariate continuous function can be decomposed into sums of univariate functions. Instead of hardcoding an activation, we **learn 1D transformations** on magnitude and phase independently:
+
+- No need to choose between CReLU, zReLU, modReLU, or other complex activations
+- Transformations are interpretable: "amplify large magnitudes" or "rotate phases toward alignment"
 - Simpler primitives may yield better generalization
+
+> [!WARNING]
+> **Theoretical gap**: The Kolmogorov-Arnold theorem is proven for real-valued functions only. Whether an analogous representation exists for complex-valued functions is an open question that warrants formal investigation.
 
 ### The Polarization Hypothesis
 
@@ -32,12 +37,11 @@ Traditional attention uses softmax to create a probability distribution over tok
 
 > **Implicit attention emerges from magnitude polarization**: important tokens naturally grow in magnitude while unimportant tokens shrink, without explicit attention weights.
 
-This is analogous to:
-- **Political polarization**: opinions cluster toward extremes
-- **Optical polarization**: certain orientations are amplified, others filtered
-- **Winner-take-all dynamics**: the rich get richer
+The inspiration comes from **polar error correction**: using simple, repeated operations that naturally polarize information. Each pass through a polarizing block nudges magnitudes apart—signal accumulates while noise diminishes. No explicit "attention scores" are computed; the separation emerges from the dynamics.
 
 ### Core Mechanics
+
+The core idea is **polarization**—the iterative amplification/suppression mechanism. Complex-valued representations with phase alignment provide an **elegant realization** of this idea: when tokens "agree," their phases align and magnitudes add constructively; when they "disagree," destructive interference diminishes their combined influence.
 
 ```
 Token Sequence → Aggregate → Polar Decompose → Transform → Recompose → Broadcast
@@ -45,10 +49,13 @@ Token Sequence → Aggregate → Polar Decompose → Transform → Recompose →
 ```
 
 1. **Aggregate**: Combine tokens into a summary (mean, attention, local window)
-2. **Decompose**: Split into log-magnitude and phase angle
+2. **Decompose**: Split into log-magnitude and phase angle (polar coordinates)
 3. **Transform**: Apply learned 1D functions to magnitude and phase independently
 4. **Recompose**: Reconstruct complex representation
 5. **Broadcast**: Add transformed aggregate back to all tokens (residual)
+
+> [!NOTE]
+> "Polar" appears in two senses: **polar coordinates** (the magnitude/phase representation) and **polarization** (the iterative separation mechanism from polar error correction). The naming is convenient but the concepts are distinct.
 
 ### Key Finding: Normalization Suppresses Polarization
 

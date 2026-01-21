@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -22,7 +23,13 @@ from pathlib import Path
 from typing import Any
 
 # Add src to path
+# Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from experiments.arg_parser import get_defaults
+
+# Get global defaults
+DEFAULTS = get_defaults()
 
 
 @dataclass
@@ -35,8 +42,8 @@ class ExperimentConfig:
     n_layers: int
     seed: int
     epochs: int
-    patience: int = 10
-    amp: bool = False
+    patience: int = DEFAULTS["patience"]
+    amp: bool = DEFAULTS["amp"]
     subset_size: int | None = None
     extra_args: dict[str, Any] | None = None
 
@@ -75,6 +82,7 @@ class BenchmarkRunner:
             "pilot_epochs": 5,
             "pilot_subset": 1000,
             "metrics": ["test_acc", "best_val_acc"],
+            "preset": "cifar10",
         },
         "timeseries": {
             "epochs": 30,
@@ -84,6 +92,7 @@ class BenchmarkRunner:
             "pilot_epochs": 3,
             "pilot_subset": None,
             "metrics": ["test_mse", "test_mae"],
+            "preset": "etth1",
         },
         "audio": {
             "epochs": 20,
@@ -93,6 +102,7 @@ class BenchmarkRunner:
             "pilot_epochs": 2,
             "pilot_subset": 500,
             "metrics": ["test_acc", "best_val_acc"],
+            "preset": "speech_commands",
         },
     }
 
@@ -100,7 +110,7 @@ class BenchmarkRunner:
         self,
         output_dir: str = "outputs/benchmark",
         pilot: bool = False,
-        amp: bool = True,
+        amp: bool = False,
         patience: int | None = None,
         epochs: int | None = None,
     ):
@@ -253,8 +263,8 @@ class BenchmarkRunner:
 
         return configs
 
-    def run_experiment(self, config: ExperimentConfig) -> ExperimentResult:
-        """Run a single experiment via subprocess."""
+    def run_experiment(self, config: ExperimentConfig, progress: str = "") -> ExperimentResult:
+        """Run a single experiment."""
         domain_cfg = self.DOMAIN_CONFIGS[config.domain]
 
         if config.model_type == "baseline":
@@ -262,22 +272,24 @@ class BenchmarkRunner:
         else:
             script = domain_cfg["script"]
 
-        # Build command
+        # Construct command
         cmd = [
             sys.executable,
             script,
         ]
 
-        # Add --domain flag for CV-KAN models (using unified train.py)
+        # Add --domain flag only for CV-KAN models (unified train.py)
         if config.model_type != "baseline":
             cmd.extend(["--domain", config.domain])
+            if "preset" in domain_cfg:
+                cmd.extend(["--preset", domain_cfg["preset"]])
 
         cmd.extend(
             [
                 "--epochs",
-                str(config.epochs),
+                str(self.epochs_override or domain_cfg["epochs"]),
                 "--patience",
-                str(config.patience),
+                str(self.patience_override or domain_cfg["patience"]),
                 "--d_complex",
                 str(config.d_complex),
                 "--n_layers",
@@ -306,34 +318,34 @@ class BenchmarkRunner:
                 else:
                     cmd.extend([f"--{k}", str(v)])
 
-        print(f"\n{'='*60}")
-        print(f"Running: {config.run_name}")
-        print(f"Command: {' '.join(cmd)}")
-        print("=" * 60)
-
         start_time = time.time()
 
+        # Pass progress info via environment variable
+        env = os.environ.copy()
+        if progress:
+            env["BENCHMARK_PROG"] = progress
+
         try:
-            # Run the training script
+            # Run the training script - inherit stdout/stderr for proper tqdm display
+            # We use subprocess.run but don't capture output so terminal handles \r
             result = subprocess.run(
                 cmd,
                 cwd=str(Path(__file__).parent.parent),
-                capture_output=True,
-                text=True,
                 timeout=7200,  # 2 hour timeout per experiment
+                env=env,
             )
 
             train_time = time.time() - start_time
 
             if result.returncode != 0:
-                print(f"FAILED: {result.stderr[:500]}")
+                print(f"FAILED: Exit code {result.returncode}")
                 return ExperimentResult(
                     config=asdict(config),
                     success=False,
                     metrics={},
                     n_params=0,
                     train_time_seconds=train_time,
-                    error_message=result.stderr[:1000],
+                    error_message=f"Exit code: {result.returncode}",
                 )
 
             # Load results from JSON
@@ -435,9 +447,7 @@ class BenchmarkRunner:
                 skipped += 1
                 continue
 
-            print(f"\n[{i}/{total}] Starting: {config.run_name}")
-
-            result = self.run_experiment(config)
+            result = self.run_experiment(config, progress=f"{i}/{total}")
             self.results.append(result)
             self.completed_runs.add(config.run_name)
 
@@ -577,7 +587,7 @@ def main():
     runner = BenchmarkRunner(
         output_dir=args.output_dir,
         pilot=args.pilot,
-        amp=not args.no_amp,  # AMP enabled by default
+        amp=False,  # AMP disabled - causes issues with complex numbers
         patience=args.patience,
         epochs=args.epochs,
     )

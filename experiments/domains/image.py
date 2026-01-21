@@ -4,28 +4,65 @@ Image classification domain (CIFAR-10).
 
 import torch.nn.functional as F
 
-from src.data import create_cifar10_dataloader
+from src.configs.model import ImageConfig
+from src.configs.training import TrainingConfig
+from src.data import (
+    create_cifar10_dataloader,
+    create_cifar100_dataloader,
+    create_fashionmnist_dataloader,
+    create_tinyimagenet_dataloader,
+)
 from src.models.cv_kan_image import CVKANImageClassifier
 from src.trainer import BaseTrainer
 
-DEFAULTS = {
-    "batch_size": 128,
-    "d_complex": 256,
-    "n_layers": 6,
-    "epochs": 100,
-    "weight_decay": 0.05,
-    "metric_name": "accuracy",
-    "metric_mode": "max",
-}
+
+def create_model(config: ImageConfig):
+    """Create image classification model."""
+    return CVKANImageClassifier(
+        img_size=config.img_size,
+        patch_size=config.patch_size,
+        in_channels=config.in_channels,
+        d_complex=config.d_complex,
+        n_layers=config.n_layers,
+        n_classes=config.n_classes,
+        kan_hidden=config.kan_hidden,
+        pos_encoding="sinusoidal" if config.pos_encoding else None,
+        pooling=config.pooling,
+        embedding_type=config.embedding_type,
+        center_magnitudes=config.center_magnitudes,
+        dropout=config.dropout,
+    )
 
 
-def add_args(parser):
-    """Add image-specific arguments."""
-    parser.add_argument("--data_root", type=str, default="./data/cifar10")
-    parser.add_argument("--img_size", type=int, default=32)
-    parser.add_argument("--patch_size", type=int, default=4)
-    parser.add_argument("--embedding_type", type=str, default="linear", choices=["linear", "conv"])
-    return parser
+def create_dataloaders(model_config: ImageConfig, train_config: TrainingConfig):
+    """Create image dataloaders based on config.dataset_name."""
+    kwargs = {
+        "batch_size": train_config.batch_size,
+        "image_size": model_config.img_size,
+        "subset_size": train_config.subset_size,
+    }
+
+    # Determine root based on dataset
+    data_root = "./data"  # Constant for now
+
+    dataset = model_config.dataset_name.upper()
+
+    if dataset == "CIFAR10":
+        root = f"{data_root}/cifar10"
+        train, val, test, n_classes = create_cifar10_dataloader(root=root, **kwargs)
+    elif dataset == "CIFAR100":
+        root = f"{data_root}/cifar100"
+        train, val, test, n_classes = create_cifar100_dataloader(root=root, **kwargs)
+    elif dataset == "FASHIONMNIST":
+        root = f"{data_root}/fashionmnist"
+        train, val, test, n_classes = create_fashionmnist_dataloader(root=root, **kwargs)
+    elif dataset == "TINYIMAGENET":
+        root = f"{data_root}/tinyimagenet"
+        train, val, test, n_classes = create_tinyimagenet_dataloader(root=root, **kwargs)
+    else:
+        raise ValueError(f"Unknown dataset: {dataset}")
+
+    return train, val, test, {"n_classes": n_classes}
 
 
 class ImageTrainer(BaseTrainer):
@@ -64,28 +101,4 @@ class ImageTrainer(BaseTrainer):
         return {"loss": loss, "accuracy": accuracy}
 
 
-def create_model(args):
-    """Create image classification model."""
-    return CVKANImageClassifier(
-        img_size=args.img_size,
-        patch_size=args.patch_size,
-        in_channels=3,
-        d_complex=args.d_complex,
-        n_layers=args.n_layers,
-        n_classes=10,  # CIFAR-10
-        kan_hidden=args.kan_hidden,
-        pos_encoding=args.pos_encoding,
-        pooling=args.pooling,
-        embedding_type=args.embedding_type,
-    )
-
-
-def create_dataloaders(args):
-    """Create CIFAR-10 dataloaders."""
-    train_loader, val_loader, test_loader, n_classes = create_cifar10_dataloader(
-        root=args.data_root,
-        batch_size=args.batch_size,
-        image_size=args.img_size,
-        subset_size=args.subset_size,
-    )
-    return train_loader, val_loader, test_loader, {"n_classes": n_classes}
+Trainer = ImageTrainer

@@ -4,26 +4,63 @@ Audio classification domain (Speech Commands).
 
 import torch.nn.functional as F
 
-from src.data import TORCHAUDIO_AVAILABLE, create_audio_dataloader
+from src.configs.model import AudioConfig
+from src.configs.training import TrainingConfig
+from src.data import (
+    TORCHAUDIO_AVAILABLE,
+    create_audio_dataloader,  # SpeechCommands
+    create_esc50_dataloader,
+    create_urbansound8k_dataloader,
+)
 from src.models.cv_kan_audio import CVKANAudio
 from src.trainer import BaseTrainer
 
-DEFAULTS = {
-    "batch_size": 256,
-    "d_complex": 128,
-    "n_layers": 4,
-    "epochs": 30,
-    "metric_name": "accuracy",
-    "metric_mode": "max",
-}
+
+def create_model(config: AudioConfig):
+    """Create audio classification model."""
+    return CVKANAudio(
+        n_fft=config.n_fft,
+        hop_length=config.hop_length,
+        d_complex=config.d_complex,
+        n_layers=config.n_layers,
+        n_classes=config.n_classes,
+        kan_hidden=config.kan_hidden,
+        task="classification",  # Currently only supporting classification in trainer
+        pooling=config.pooling,
+        use_stft_frontend=True,
+        dropout=config.dropout,
+        center_magnitudes=config.center_magnitudes,
+    )
 
 
-def add_args(parser):
-    """Add audio-specific arguments."""
-    parser.add_argument("--data_root", type=str, default="./data/speech_commands")
-    parser.add_argument("--n_fft", type=int, default=512)
-    parser.add_argument("--hop_length", type=int, default=128)
-    return parser
+def create_dataloaders(model_config: AudioConfig, train_config: TrainingConfig):
+    """Create audio dataloaders based on config.dataset_name."""
+    if not TORCHAUDIO_AVAILABLE:
+        raise RuntimeError("torchaudio is required for audio domain")
+
+    kwargs = {
+        "batch_size": train_config.batch_size,
+        "subset_size": train_config.subset_size,
+    }
+
+    dataset = model_config.dataset_name.lower()
+    data_root = "./data"  # Constant or derived
+
+    if dataset == "speech_commands":
+        root = f"{data_root}/speech_commands"
+        train, val, test, n_classes = create_audio_dataloader(root=root, download=True, **kwargs)
+    elif dataset == "esc50":
+        root = f"{data_root}/esc50"
+        train, val, test, n_classes = create_esc50_dataloader(root=root, download=True, **kwargs)
+    elif dataset == "urbansound8k":
+        root = f"{data_root}/urbansound8k"
+        train, val, test, n_classes = create_urbansound8k_dataloader(
+            root=root, download=False, **kwargs
+        )
+    else:
+        raise ValueError(f"Unknown dataset: {dataset}")
+
+    return train, val, test, {"n_classes": n_classes}
 
 
 class AudioTrainer(BaseTrainer):
@@ -64,30 +101,4 @@ class AudioTrainer(BaseTrainer):
         return {"loss": loss, "accuracy": accuracy}
 
 
-def create_model(args):
-    """Create audio classification model."""
-    return CVKANAudio(
-        n_fft=args.n_fft,
-        hop_length=args.hop_length,
-        d_complex=args.d_complex,
-        n_layers=args.n_layers,
-        n_classes=args.n_classes,
-        kan_hidden=args.kan_hidden,
-        task="classification",
-        pooling=args.pooling,
-        use_stft_frontend=True,
-    )
-
-
-def create_dataloaders(args):
-    """Create Speech Commands dataloaders."""
-    if not TORCHAUDIO_AVAILABLE:
-        raise RuntimeError("torchaudio is required for audio domain")
-
-    train_loader, val_loader, test_loader, n_classes = create_audio_dataloader(
-        root=args.data_root,
-        batch_size=args.batch_size,
-        subset_size=args.subset_size,
-        download=True,
-    )
-    return train_loader, val_loader, test_loader, {"n_classes": n_classes}
+Trainer = AudioTrainer

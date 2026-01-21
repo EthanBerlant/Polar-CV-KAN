@@ -177,7 +177,7 @@ class BaseCVKAN(nn.Module, ABC):
             if mask is not None:
                 attn = attn * mask.unsqueeze(-1)
                 attn = attn / attn.sum(dim=1, keepdim=True).clamp(min=1e-6)
-            return torch.einsum("btq,btd->bqd", attn, z).squeeze(1)
+            return torch.einsum("btq,btd->bqd", attn.to(z.dtype), z).squeeze(1)
 
         else:
             raise ValueError(f"Unknown pooling strategy: {self.pooling_strategy}")

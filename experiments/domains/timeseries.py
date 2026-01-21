@@ -1,32 +1,61 @@
 """
-Time series forecasting domain (ETTh1).
+Time series forecasting domain (ETTh1, ETTm1, Exchange).
 """
 
 import torch.nn.functional as F
 
-from src.data import create_timeseries_dataloader
+from src.configs.model import TimeSeriesConfig
+from src.configs.training import TrainingConfig
+from src.data import (
+    create_ettm1_dataloader,
+    create_timeseries_dataloader,  # ETTh1
+)
+from src.data.timeseries_extension import create_exchange_dataloader
 from src.models.cv_kan_timeseries import CVKANTimeSeries
 from src.trainer import BaseTrainer
 
-DEFAULTS = {
-    "batch_size": 32,
-    "d_complex": 64,
-    "n_layers": 4,
-    "epochs": 50,
-    "metric_name": "mse",
-    "metric_mode": "min",
-}
 
-
-def add_args(parser):
-    """Add timeseries-specific arguments."""
-    parser.add_argument("--data_root", type=str, default="./data/ETT")
-    parser.add_argument("--seq_len", type=int, default=96, help="Lookback window")
-    parser.add_argument("--pred_len", type=int, default=96, help="Prediction horizon")
-    parser.add_argument(
-        "--output_mode", type=str, default="real", choices=["magnitude", "real", "phase", "both"]
+def create_model(config: TimeSeriesConfig):
+    """Create time series forecasting model."""
+    return CVKANTimeSeries(
+        input_dim=config.d_input,
+        d_complex=config.d_complex,
+        n_layers=config.n_layers,
+        output_dim=config.d_input,
+        kan_hidden=config.kan_hidden,
+        output_mode=config.output_mode,
+        forecast_horizon=config.pred_len,
+        pos_encoding="sinusoidal",  # or config if we add it
+        dropout=config.dropout,
+        center_magnitudes=config.center_magnitudes,
     )
-    return parser
+
+
+def create_dataloaders(model_config: TimeSeriesConfig, train_config: TrainingConfig):
+    """Create dataloaders based on config.dataset_name."""
+    kwargs = {
+        "batch_size": train_config.batch_size,
+        "seq_len": model_config.seq_len,
+        "pred_len": model_config.pred_len,
+        "subset_size": train_config.subset_size,
+    }
+
+    dataset = model_config.dataset_name.lower()
+    data_root = "./data"
+
+    if dataset == "etth1":
+        root = f"{data_root}/ETT"
+        train, val, test, dim = create_timeseries_dataloader(root=root, **kwargs)
+    elif dataset == "ettm1":
+        root = f"{data_root}/ETT"
+        train, val, test, dim = create_ettm1_dataloader(root=root, **kwargs)
+    elif dataset == "exchange":
+        root = f"{data_root}/exchange"
+        train, val, test, dim = create_exchange_dataloader(root=root, **kwargs)
+    else:
+        raise ValueError(f"Unknown dataset: {dataset}")
+
+    return train, val, test, {"input_dim": dim}
 
 
 class TimeSeriesTrainer(BaseTrainer):
@@ -37,7 +66,8 @@ class TimeSeriesTrainer(BaseTrainer):
         seq_x = seq_x.to(self.device)
         seq_y = seq_y.to(self.device)
 
-        pred_len = self.args.pred_len
+        # Access prediction length from model
+        pred_len = self.model.forecast_horizon
         target = seq_y[:, -pred_len:, :]
 
         outputs = self.model(seq_x, return_sequence=False)
@@ -53,7 +83,7 @@ class TimeSeriesTrainer(BaseTrainer):
         seq_x = seq_x.to(self.device)
         seq_y = seq_y.to(self.device)
 
-        pred_len = self.args.pred_len
+        pred_len = self.model.forecast_horizon
         target = seq_y[:, -pred_len:, :]
 
         outputs = self.model(seq_x, return_sequence=False)
@@ -65,29 +95,4 @@ class TimeSeriesTrainer(BaseTrainer):
         return {"loss": loss, "mse": loss, "mae": mae}
 
 
-def create_model(args):
-    """Create time series forecasting model."""
-    pos_enc = args.pos_encoding if args.pos_encoding != "none" else None
-
-    return CVKANTimeSeries(
-        input_dim=args.input_dim,
-        d_complex=args.d_complex,
-        n_layers=args.n_layers,
-        output_dim=args.input_dim,
-        kan_hidden=args.kan_hidden,
-        output_mode=args.output_mode,
-        forecast_horizon=args.pred_len,
-        pos_encoding=pos_enc,
-        dropout=args.dropout,
-    )
-
-
-def create_dataloaders(args):
-    """Create ETTh1 dataloaders."""
-    train_loader, val_loader, test_loader, input_dim = create_timeseries_dataloader(
-        root=args.data_root,
-        batch_size=args.batch_size,
-        seq_len=args.seq_len,
-        pred_len=args.pred_len,
-    )
-    return train_loader, val_loader, test_loader, {"input_dim": input_dim}
+Trainer = TimeSeriesTrainer

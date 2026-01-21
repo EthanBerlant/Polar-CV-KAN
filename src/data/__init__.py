@@ -11,6 +11,8 @@ from .image_data import (
     create_cifar100_dataloader,
     create_fashionmnist_dataloader,
 )
+from .image_extension import create_tinyimagenet_dataloader
+from .nlp_loader import NLPDataLoader
 from .synthetic import SignalNoiseDataset, create_signal_noise_dataloader
 from .text import (
     TextDataset,
@@ -28,6 +30,7 @@ from .timeseries_data import (
     create_timeseries_dataloader,
     create_weather_dataloader,
 )
+from .timeseries_extension import create_exchange_dataloader
 
 __all__ = [
     # Synthetic
@@ -56,4 +59,8 @@ __all__ = [
     "pad_collate",
     "Vocabulary",
     "TextDataset",
+    # New
+    "create_tinyimagenet_dataloader",
+    "create_exchange_dataloader",
+    "NLPDataLoader",
 ]

@@ -1,85 +1,202 @@
-"""
-CV-KAN: Full model for sequence classification.
-
-Architecture:
-- Input embedding → complex projection
-- Stack of PolarizingBlocks (no normalization - magnitudes encode attention)
-- Log-magnitude centering to prevent drift
-- Global pooling → classifier head
-
-Note: Traditional normalization (LayerNorm, RMSNorm) is intentionally NOT used
-because magnitudes in CV-KAN encode attention-like information. Normalizing
-would destroy this signal. Instead, we use log-magnitude centering which
-preserves relative magnitudes while preventing absolute scale drift.
-
-Inherits from BaseCVKAN for shared functionality.
-"""
-
-from typing import Literal
+from typing import Any
 
 import torch
 import torch.nn as nn
 
-from ..modules.multi_head import (
-    EmergentHeadsPolarizing,
-    FactoredHeadsPolarizing,
-    PhaseOffsetPolarizing,
-)
-from ..modules.phase_attention import PhaseAttentionBlock
-from .base import BaseCVKAN, ComplexEmbedding, build_classifier_head
+from ..configs.model import CVKANConfig
+from .backbone import CVKANBackbone
+from .base import ComplexEmbedding, build_classifier_head
+from .protocols import Backbone, Embedding, Head
 
 
-class ComplexInputEmbedding(nn.Module):
+class CVKAN(nn.Module):
     """
-    Handle complex input directly (for the synthetic task).
+    Unified CV-KAN model using composition over inheritance.
 
-    Optionally applies a learnable linear transform in complex space.
-
-    Args:
-        d_in: Input complex dimension
-        d_out: Output complex dimension
-        use_transform: Whether to apply a transform (if d_in == d_out, can skip)
+    Structure:
+        Input -> Embedding -> Backbone -> Head -> Output
     """
 
-    def __init__(self, d_in: int, d_out: int, use_transform: bool = True):
+    def __init__(
+        self,
+        embedding: Embedding,
+        backbone: Backbone,
+        head: Head,
+    ):
         super().__init__()
-        self.d_in = d_in
-        self.d_out = d_out
-        self.use_transform = use_transform and (d_in != d_out)
+        self.embedding = embedding
+        self.backbone = backbone
+        self.head = head
 
-        if self.use_transform:
-            # Complex linear transform
-            self.weight = nn.Parameter(torch.randn(d_in, d_out, dtype=torch.cfloat) * 0.02)
+    def forward(self, x: torch.Tensor, mask: torch.Tensor = None, **kwargs) -> dict[str, Any]:
+        """
+        Standard forward pass.
+        Returns dict for flexibility (logits, auxiliary outputs from head).
+        """
+        # 1. Embed (Real/Index -> Complex Sequence)
+        z = self.embedding(x)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Pass through or transform complex input."""
-        if self.use_transform:
-            return torch.einsum("...i,io->...o", x, self.weight)
-        return x
+        # 2. Backbone (Refine Complex Sequence)
+        z = self.backbone(z, mask=mask)
+
+        # 3. Head (Pool & Classify)
+        return self.head(z, mask=mask)
+
+    @classmethod
+    def from_config(cls, config: CVKANConfig, input_dim: int, n_classes: int):
+        """Factory method to create a standard Sequence Classification CVKAN."""
+
+        # 1. Standard Embedding
+        if config.input_type == "real":
+            embedding = ComplexEmbedding(input_dim, config.d_complex)
+        else:
+            # Identity/Passthrough embedding for complex inputs (synthetic)
+            if input_dim != config.d_complex:
+                embedding = ComplexProjection(input_dim, config.d_complex)
+            else:
+
+                class IdentityComplexEmbedding(nn.Module):
+                    def forward(self, x):
+                        return x
+
+                embedding = IdentityComplexEmbedding()
+
+        # 2. Standard Backbone
+        backbone = CVKANBackbone(config)
+
+        # 3. Standard Classification Head
+        # We need to wrap detailed pooling/classification logic into a Head component
+        # Currently BaseCVKAN has _pool and _extract_features.
+        # Let's create a reusable StandardHead
+        head = StandardClassificationHead(
+            d_complex=config.d_complex,
+            n_classes=n_classes,
+            kan_hidden=config.kan_hidden,
+            pooling=config.pooling,
+            dropout=config.dropout,
+        )
+
+        return cls(embedding, backbone, head)
 
 
-class CVKAN(BaseCVKAN):
+class StandardClassificationHead(nn.Module):
     """
-    Complete CV-KAN model for sequence classification.
+    Standard head: Pooling -> Magnitude -> Classifier.
+    """
 
-    This architecture uses complex-valued representations where magnitudes
-    encode attention-like information ("polarization"). Traditional normalization
-    is NOT used because it would destroy the magnitude signal.
+    def __init__(self, d_complex, n_classes, kan_hidden, pooling, dropout):
+        super().__init__()
+        self.d_complex = d_complex
+        self.pooling_type = pooling
 
-    Inherits from BaseCVKAN for log-magnitude centering and pooling.
+        # Pooling Query (for attention pooling)
+        if pooling == "attention":
+            self.pool_query = nn.Parameter(torch.randn(1, 1, d_complex, dtype=torch.cfloat) * 0.02)
 
-    Args:
-        d_input: Input dimension (real if input_type='real', complex if 'complex')
-        d_complex: Complex representation dimension
-        n_layers: Number of layers
-        n_classes: Number of output classes
-        kan_hidden: Hidden dimension for KAN MLPs
-        head_approach: 'emergent', 'offset', or 'factored' (for polarizing block)
-        n_heads: Number of heads (for offset/factored/attention)
-        input_type: 'real' or 'complex'
-        pooling: 'mean', 'max', or 'attention'
-        block_type: 'polarizing' or 'attention'
-        center_magnitudes: Whether to center log-magnitudes to prevent drift
+        self.classifier = build_classifier_head(
+            d_complex=d_complex, n_classes=n_classes, hidden_dim=kan_hidden, dropout=dropout
+        )
+
+    def _pool(self, z: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+        if self.pooling_type == "mean":
+            if mask is not None:
+                mask_expanded = mask.unsqueeze(-1)
+                sum_z = (z * mask_expanded).sum(dim=1)
+                count = mask_expanded.sum(dim=1).clamp(min=1.0)
+                return sum_z / count
+            else:
+                return z.mean(dim=1)
+
+        elif self.pooling_type == "max":
+            mag = torch.abs(z)
+            if mask is not None:
+                mag = mag.masked_fill(mask.unsqueeze(-1) == 0, -1e9)
+
+            # Select token with max magnitude per dimension
+            # (batch, d_complex) indices
+            _, indices = mag.max(dim=1)
+
+            # Gather complex values
+            # This is tricky in PyTorch complex.
+            # Simplified: just return max magnitude for features (phase lost in max pool usually)
+            # But we need complex output for consistency?
+            # Let's stick to returning the complex value at max mag index
+            batch_indices = torch.arange(z.size(0), device=z.device).unsqueeze(-1)
+            dim_indices = torch.arange(z.size(2), device=z.device).unsqueeze(0)
+            return z[batch_indices, indices, dim_indices]
+
+        elif self.pooling_type == "attention":
+            # Simple dot-product attention with learnable query
+            # Query: (1, 1, d)
+            # Keys: z (b, n, d)
+            # Re{Query * conj(Keys)}
+
+            scores = (self.pool_query * z.conj()).real  # (b, n, d)
+            scores = scores.mean(dim=-1)  # (b, n) average agreement across dims
+
+            if mask is not None:
+                scores = scores.masked_fill(mask == 0, -1e9)
+
+            attn = torch.softmax(scores, dim=1).unsqueeze(-1)  # (b, n, 1)
+            return (z * attn).sum(dim=1)
+
+        else:
+            raise ValueError(f"Unknown pooling: {self.pooling_type}")
+
+    def forward(self, z: torch.Tensor, mask: torch.Tensor | None = None) -> dict[str, Any]:
+        # Pool
+        pooled = self._pool(z, mask)
+
+        # Feature extraction (Magnitude)
+        features = torch.abs(pooled)
+
+        # Classify
+        logits = self.classifier(features)
+
+        return {"logits": logits, "pooled": pooled, "features": features}
+
+
+class TokenClassificationHead(nn.Module):
+    """
+    Head for per-token classification.
+    No pooling, just projection of each token's magnitude.
+    """
+
+    def __init__(self, d_complex, n_classes, kan_hidden, dropout):
+        super().__init__()
+        self.classifier = build_classifier_head(
+            d_complex=d_complex, n_classes=n_classes, hidden_dim=kan_hidden, dropout=dropout
+        )
+
+    def forward(self, z: torch.Tensor, mask: torch.Tensor | None = None) -> dict[str, Any]:
+        # z: (B, L, D) checks
+        # Features: (B, L, D) magnitude
+        features = torch.abs(z)
+
+        # Logits: (B, L, C)
+        logits = self.classifier(features)
+
+        return {"token_logits": logits, "features": features}
+
+
+class ComplexProjection(nn.Module):
+    """
+    Project complex inputs to different dimension [Complex -> Complex].
+    Uses complex-valued linear layer.
+    """
+
+    def __init__(self, d_input, d_output):
+        super().__init__()
+        self.linear = nn.Linear(d_input, d_output, bias=False, dtype=torch.cfloat)
+
+    def forward(self, x):
+        return self.linear(x)
+
+
+class CVKANTokenClassifier(CVKAN):
+    """
+    CV-KAN model for token classification tasks (e.g., NER, signal detection).
+    Legacy wrapper around composed CVKAN with TokenClassificationHead.
     """
 
     def __init__(
@@ -89,219 +206,46 @@ class CVKAN(BaseCVKAN):
         n_layers: int = 4,
         n_classes: int = 2,
         kan_hidden: int = 32,
-        head_approach: Literal["emergent", "offset", "factored"] = "emergent",
+        head_approach: str = "emergent",
         n_heads: int = 8,
-        input_type: Literal["real", "complex"] = "complex",
-        pooling: Literal["mean", "max", "attention"] = "mean",
-        block_type: Literal["polarizing", "attention"] = "polarizing",
+        input_type: str = "complex",
+        block_type: str = "polarizing",
         center_magnitudes: bool = True,
+        dropout: float = 0.0,
     ):
-        # Initialize base class
-        super().__init__(
+        # 1. Config
+        config = CVKANConfig(
             d_complex=d_complex,
             n_layers=n_layers,
             kan_hidden=kan_hidden,
-            pooling=pooling,
+            head_approach=head_approach,
+            block_type=block_type,
+            n_heads=n_heads,
             center_magnitudes=center_magnitudes,
+            dropout=dropout,
+            input_type=input_type,
         )
 
-        self.head_approach = head_approach
-        self.block_type = block_type
-
-        # Input embedding
+        # 2. Embedding
         if input_type == "real":
-            self.embedding = ComplexEmbedding(d_input, d_complex)
+            embedding = ComplexEmbedding(d_input, d_complex)
         else:
-            self.embedding = ComplexInputEmbedding(d_input, d_complex)
-
-        # Override layers with configured block type
-        self.layers = self._build_cvkan_layers(head_approach, block_type, n_heads)
-
-        # Classification head (operates on magnitude)
-        self.classifier = build_classifier_head(
-            d_complex=d_complex,
-            n_classes=n_classes,
-            hidden_dim=kan_hidden,
-            dropout=0.0,  # Keep original behavior
-        )
-
-    def _build_cvkan_layers(
-        self, head_approach: str, block_type: str, n_heads: int
-    ) -> nn.ModuleList:
-        """Build layers based on head approach and block type."""
-        layers = nn.ModuleList()
-
-        for _ in range(self.n_layers):
-            if block_type == "polarizing":
-                if head_approach == "emergent":
-                    layer = EmergentHeadsPolarizing(self.d_complex, self.kan_hidden)
-                elif head_approach == "offset":
-                    d_per_head = self.d_complex // n_heads
-                    layer = PhaseOffsetPolarizing(n_heads, d_per_head, self.kan_hidden)
-                elif head_approach == "factored":
-                    d_per_head = self.d_complex // n_heads
-                    layer = FactoredHeadsPolarizing(
-                        n_heads, self.d_complex, d_per_head, self.kan_hidden
-                    )
-                else:
-                    raise ValueError(f"Unknown head approach: {head_approach}")
-            elif block_type == "attention":
-                layer = PhaseAttentionBlock(self.d_complex, n_heads=n_heads)
+            if d_input != d_complex:
+                embedding = ComplexProjection(d_input, d_complex)
             else:
-                raise ValueError(f"Unknown block type: {block_type}")
 
-            layers.append(layer)
+                class IdentityComplexEmbedding(nn.Module):
+                    def forward(self, x):
+                        return x
 
-        return layers
+                embedding = IdentityComplexEmbedding()
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        mask: torch.Tensor = None,
-        return_intermediates: bool = False,
-    ) -> dict:
-        """
-        Forward pass.
+        # 3. Backbone
+        backbone = CVKANBackbone(config)
 
-        Args:
-            x: Input tensor of shape (batch, n_tokens, d_input)
-            mask: Optional binary mask (batch, n_tokens)
-            return_intermediates: If True, return intermediate representations
-
-        Returns:
-            Dictionary with:
-                - logits: Classification logits (batch, n_classes)
-                - pooled: Pooled representation (batch, d_complex) - complex
-                - intermediates: List of intermediate Z values (if requested)
-        """
-        intermediates = []
-
-        # Embed to complex space
-        Z = self.embedding(x)
-        if return_intermediates:
-            intermediates.append(Z.clone())
-
-        # Apply polarizing layers
-        for layer in self.layers:
-            Z = layer(Z, mask=mask)
-            if return_intermediates:
-                intermediates.append(Z.clone())
-
-        # Center log-magnitudes (from base class)
-        if self.center_magnitudes:
-            Z = self._center_log_magnitudes(Z)
-
-        # Pool across tokens (from base class)
-        pooled = self._pool(Z, mask)
-
-        # Classify based on magnitude (phase-invariant)
-        features = self._extract_features(pooled)
-        logits = self.classifier(features)
-
-        output = {
-            "logits": logits,
-            "pooled": pooled,
-        }
-
-        if return_intermediates:
-            output["intermediates"] = intermediates
-
-        return output
-
-    def get_phase_coherence(self, Z: torch.Tensor) -> torch.Tensor:
-        """
-        Compute phase coherence across tokens.
-
-        High coherence = tokens have similar phases = attention-like alignment.
-
-        Args:
-            Z: Complex tensor of shape (batch, n_tokens, d_complex)
-
-        Returns:
-            Coherence per dimension of shape (batch, d_complex)
-        """
-        phases = torch.angle(Z)  # (batch, n_tokens, d)
-
-        # Circular mean resultant length
-        cos_sum = torch.cos(phases).sum(dim=1)
-        sin_sum = torch.sin(phases).sum(dim=1)
-        n = phases.shape[1]
-        R = torch.sqrt(cos_sum**2 + sin_sum**2) / n
-
-        return R  # [0, 1] per dimension, 1 = perfect coherence
-
-
-class CVKANTokenClassifier(CVKAN):
-    """
-    CV-KAN variant for per-token classification (e.g., signal/noise detection).
-
-    Instead of pooling, outputs logits per token.
-    """
-
-    def __init__(self, **kwargs):
-        # Remove n_classes from kwargs temporarily
-        n_classes = kwargs.pop("n_classes", 2)
-        super().__init__(n_classes=n_classes, **kwargs)
-
-        # Replace classifier with per-token version
-        self.token_classifier = nn.Sequential(
-            nn.Linear(self.d_complex, self.kan_hidden),
-            nn.GELU(),
-            nn.Linear(self.kan_hidden, n_classes),
+        # 4. Head
+        head = TokenClassificationHead(
+            d_complex=d_complex, n_classes=n_classes, kan_hidden=kan_hidden, dropout=dropout
         )
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        mask: torch.Tensor = None,
-        return_intermediates: bool = False,
-    ) -> dict:
-        """
-        Forward pass for token classification.
-
-        Returns:
-            Dictionary with:
-                - token_logits: Per-token logits (batch, n_tokens, n_classes)
-                - sequence_logits: Sequence-level logits (batch, n_classes)
-                - Z: Final complex representation
-        """
-        intermediates = []
-
-        # Embed
-        Z = self.embedding(x)
-        if return_intermediates:
-            intermediates.append(Z.clone())
-
-        # Apply layers
-        for layer in self.layers:
-            Z = layer(Z, mask=mask)
-            if return_intermediates:
-                intermediates.append(Z.clone())
-
-        # Center log-magnitudes
-        if self.center_magnitudes:
-            Z = self._center_log_magnitudes(Z)
-
-        # Per-token classification (on magnitudes)
-        token_features = torch.abs(Z)  # (batch, n_tokens, d)
-        token_logits = self.token_classifier(token_features)  # (batch, n_tokens, n_classes)
-
-        # Sequence-level: pool token logits
-        if mask is not None:
-            mask_expanded = mask.unsqueeze(-1).float()
-            sum_logits = (token_logits * mask_expanded).sum(dim=1)
-            count = mask_expanded.sum(dim=1).clamp(min=1.0)
-            sequence_logits = sum_logits / count
-        else:
-            sequence_logits = token_logits.mean(dim=1)
-
-        output = {
-            "token_logits": token_logits,
-            "sequence_logits": sequence_logits,
-            "Z": Z,
-        }
-
-        if return_intermediates:
-            output["intermediates"] = intermediates
-
-        return output
+        super().__init__(embedding, backbone, head)

@@ -17,83 +17,24 @@ from typing import Literal
 import torch
 import torch.nn as nn
 
-from ..modules.aggregation import CausalAggregation
-from ..modules.polarizing_block import PolarizingBlock
+from ..configs.model import CVKANConfig
 from ..modules.positional_encoding import (
     ComplexPositionalEncoding,
     LearnableComplexPositionalEncoding,
 )
-from .base import BaseCVKAN, ComplexEmbedding
+from .base import ComplexEmbedding
+from .cv_kan import CVKAN, CVKANBackbone
 
 
-class CVKANTimeSeries(BaseCVKAN):
+class TimeSeriesEmbedding(nn.Module):
     """
-    CV-KAN model for time series forecasting.
-
-    Uses causal aggregation for autoregressive processing, with multiple
-    output decoding strategies optimized for different forecasting tasks.
-
-    Inherits from BaseCVKAN for log-magnitude centering.
-
-    Args:
-        input_dim: Input feature dimension per timestep
-        d_complex: Complex representation dimension
-        n_layers: Number of causal polarizing layers
-        output_dim: Output dimension per timestep
-        kan_hidden: Hidden size for KAN MLPs
-        output_mode: Decoding strategy:
-            - 'magnitude': Predict positive values (prices, counts)
-            - 'real': Predict signed values
-            - 'phase': Predict periodic signals (seasonal data)
-            - 'both': Output both real and imaginary parts
-        forecast_horizon: Number of future steps to predict (None = per-step)
-        pos_encoding: 'sinusoidal', 'learnable', or None
-        center_magnitudes: Whether to center log-magnitudes (recommended)
+    Composite embedding for TimeSeries: Complex Projection + Positional Encoding.
     """
 
-    def __init__(
-        self,
-        input_dim: int = 1,
-        d_complex: int = 64,
-        n_layers: int = 4,
-        output_dim: int = 1,
-        kan_hidden: int = 32,
-        output_mode: Literal["magnitude", "real", "phase", "both"] = "real",
-        forecast_horizon: int | None = None,
-        pos_encoding: Literal["sinusoidal", "learnable"] | None = "sinusoidal",
-        dropout: float = 0.0,
-        center_magnitudes: bool = True,
-    ):
-        # Initialize base class (pooling not used for timeseries)
-        super().__init__(
-            d_complex=d_complex,
-            n_layers=n_layers,
-            kan_hidden=kan_hidden,
-            pooling="mean",  # Not used, but required by base
-            center_magnitudes=center_magnitudes,
-        )
-
-        self.output_mode = output_mode
-        self.forecast_horizon = forecast_horizon
-        self.output_dim = output_dim
-
-        # Override layers to use causal aggregation
-        # per_dim=False because CausalAggregation returns per-position aggregates (batch, seq, d)
-        # not global aggregates (batch, 1, d)
-        causal_agg = CausalAggregation()
-        self.layers = nn.ModuleList(
-            [
-                PolarizingBlock(
-                    d_complex, kan_hidden, aggregation=causal_agg, per_dim=False, dropout=dropout
-                )
-                for _ in range(n_layers)
-            ]
-        )
-
-        # Embedding
+    def __init__(self, input_dim, d_complex, pos_encoding="sinusoidal"):
+        super().__init__()
         self.embedding = ComplexEmbedding(input_dim, d_complex)
 
-        # Positional encoding
         if pos_encoding == "sinusoidal":
             self.pos_encoding = ComplexPositionalEncoding(d_complex)
         elif pos_encoding == "learnable":
@@ -101,7 +42,28 @@ class CVKANTimeSeries(BaseCVKAN):
         else:
             self.pos_encoding = None
 
-        # Output projection
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        z = self.embedding(x)
+        if self.pos_encoding is not None:
+            z = self.pos_encoding(z)
+        return z
+
+
+class TimeSeriesHead(nn.Module):
+    """
+    Forecasting head for Time Series.
+    Supports multiple decoding modes and horizons.
+    """
+
+    def __init__(
+        self, output_dim, d_complex, kan_hidden, output_mode="real", forecast_horizon=None
+    ):
+        super().__init__()
+        self.output_mode = output_mode
+        self.output_dim = output_dim
+        self.forecast_horizon = forecast_horizon
+
+        # Output projection input size
         if output_mode == "both":
             proj_input = d_complex * 2
         else:
@@ -123,84 +85,96 @@ class CVKANTimeSeries(BaseCVKAN):
             )
 
     def _decode(self, z: torch.Tensor) -> torch.Tensor:
-        """
-        Decode complex representation based on output_mode.
-
-        Args:
-            z: Complex tensor
-
-        Returns:
-            Real tensor for prediction
-        """
         if self.output_mode == "magnitude":
             return torch.abs(z)
         elif self.output_mode == "real":
             return z.real
         elif self.output_mode == "phase":
-            # Map phase from [-pi, pi] to output range
             return torch.angle(z)
         elif self.output_mode == "both":
             return torch.cat([z.real, z.imag], dim=-1)
         else:
             raise ValueError(f"Unknown output_mode: {self.output_mode}")
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        mask: torch.Tensor | None = None,
-        return_sequence: bool = True,
-    ) -> dict:
-        """
-        Forward pass for time series forecasting.
-
-        Args:
-            x: Input tensor (batch, seq_len, input_dim)
-            mask: Optional mask (batch, seq_len)
-            return_sequence: Whether to return per-step predictions
-
-        Returns:
-            Dictionary with:
-                - predictions: Forecasted values
-                - sequence_output: Per-timestep outputs (if return_sequence=True)
-                - z_final: Final complex representation
-        """
-        batch, seq_len, _ = x.shape
-
-        # Embed
-        z = self.embedding(x)
-
-        # Position encoding
-        if self.pos_encoding is not None:
-            z = self.pos_encoding(z)
-
-        # Apply causal layers with magnitude centering (from base class)
-        z = self._apply_layers(z, mask)
-
-        # Decode
+    def forward(self, z: torch.Tensor, return_sequence: bool = True, **kwargs) -> dict:
         features = self._decode(z)
-
         output = {"z_final": z}
 
         if self.forecast_horizon is not None:
-            # Multi-step forecast from final position
-            final_features = features[:, -1]  # (batch, proj_input)
-            forecast = self.output_proj(final_features)  # (batch, horizon * output_dim)
-            forecast = forecast.view(batch, self.forecast_horizon, self.output_dim)
+            # Multi-step from final position
+            # z shape: (batch, seq, d)
+            final_features = features[:, -1]  # (batch, d_proj)
+            forecast = self.output_proj(final_features)
+            forecast = forecast.view(-1, self.forecast_horizon, self.output_dim)
             output["predictions"] = forecast
         else:
-            # Per-timestep predictions
-            predictions = self.output_proj(features)  # (batch, seq_len, output_dim)
+            # Per-timestep
+            predictions = self.output_proj(features)
             output["predictions"] = predictions
 
         if return_sequence:
             if self.forecast_horizon is None:
                 output["sequence_output"] = output["predictions"]
             else:
-                # Also compute per-step outputs
+                # Compute per-step outputs for sequence return if needed
                 seq_output = self.output_proj(features)
                 output["sequence_output"] = seq_output
 
         return output
+
+
+class CVKANTimeSeries(CVKAN):
+    """
+    CV-KAN model for time series forecasting (Composition-based).
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 1,
+        d_complex: int = 64,
+        n_layers: int = 4,
+        output_dim: int = 1,
+        kan_hidden: int = 32,
+        output_mode: Literal["magnitude", "real", "phase", "both"] = "real",
+        forecast_horizon: int | None = None,
+        pos_encoding: Literal["sinusoidal", "learnable"] | None = "sinusoidal",
+        dropout: float = 0.0,
+        center_magnitudes: bool = True,
+        **kwargs,
+    ):
+        # 1. Config
+        # Force aggregation_type="causal" for time series
+        config = CVKANConfig(
+            d_complex=d_complex,
+            n_layers=n_layers,
+            kan_hidden=kan_hidden,
+            center_magnitudes=center_magnitudes,
+            dropout=dropout,
+            input_type="real",
+            aggregation_type="causal",
+            block_type="polarizing",  # Or use default
+            head_approach="emergent",  # Default
+        )
+
+        # 2. Components
+        embedding = TimeSeriesEmbedding(
+            input_dim=input_dim, d_complex=d_complex, pos_encoding=pos_encoding
+        )
+
+        backbone = CVKANBackbone(config)
+
+        head = TimeSeriesHead(
+            output_dim=output_dim,
+            d_complex=d_complex,
+            kan_hidden=kan_hidden,
+            output_mode=output_mode,
+            forecast_horizon=forecast_horizon,
+        )
+
+        super().__init__(embedding, backbone, head)
+
+        self.forecast_horizon = forecast_horizon
+        self.output_dim = output_dim
 
     def generate(
         self,
@@ -210,17 +184,8 @@ class CVKANTimeSeries(BaseCVKAN):
     ) -> torch.Tensor:
         """
         Autoregressive generation for time series.
-
-        Args:
-            x: Initial context (batch, context_len, input_dim)
-            n_steps: Number of steps to generate
-            temperature: Sampling temperature (for stochastic generation)
-
-        Returns:
-            Generated sequence (batch, n_steps, output_dim)
         """
         generated = []
-
         current = x
 
         for _ in range(n_steps):
@@ -235,7 +200,7 @@ class CVKANTimeSeries(BaseCVKAN):
 
             generated.append(next_pred)
 
-            # Append to context (rolling window could be used for efficiency)
+            # Append to context
             current = torch.cat([current, next_pred], dim=1)
 
         return torch.cat(generated, dim=1)

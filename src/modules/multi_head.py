@@ -31,10 +31,10 @@ class EmergentHeadsPolarizing(nn.Module):
         kan_hidden: Hidden size for KAN MLPs
     """
 
-    def __init__(self, d_complex: int, kan_hidden: int = 32):
+    def __init__(self, d_complex: int, kan_hidden: int = 32, aggregation=None, **kwargs):
         super().__init__()
         self.d_complex = d_complex
-        self.block = PolarizingBlock(d_complex, kan_hidden)
+        self.block = PolarizingBlock(d_complex, kan_hidden, aggregation=aggregation, **kwargs)
 
     def forward(self, Z: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
         """
@@ -83,6 +83,8 @@ class PhaseOffsetPolarizing(nn.Module):
         n_heads: int,
         d_per_head: int,
         kan_hidden: int = 32,
+        aggregation=None,  # Shared aggregation
+        **kwargs,
     ):
         super().__init__()
         self.n_heads = n_heads
@@ -93,7 +95,7 @@ class PhaseOffsetPolarizing(nn.Module):
         self.register_buffer("phase_offsets", offsets)
 
         # Shared polarizing transform (parameter efficient)
-        self.polarizer = PolarizingBlock(d_per_head, kan_hidden)
+        self.polarizer = PolarizingBlock(d_per_head, kan_hidden, aggregation=aggregation, **kwargs)
 
     def forward(self, Z: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
         """

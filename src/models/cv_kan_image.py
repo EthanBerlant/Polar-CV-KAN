@@ -15,12 +15,14 @@ from typing import Literal
 import torch
 import torch.nn as nn
 
+from ..configs.model import CVKANConfig
 from ..modules.pooling import AttentionPool2d
 from ..modules.positional_encoding import (
     Complex2DPositionalEncoding,
     Learnable2DComplexPositionalEncoding,
 )
-from .base import BaseCVKAN, build_classifier_head
+from .base import build_classifier_head
+from .cv_kan import CVKAN, CVKANBackbone
 
 
 class LinearPatchEmbedding(nn.Module):
@@ -83,12 +85,45 @@ class LinearPatchEmbedding(nn.Module):
                 - Spatial shape tuple (n_patches_h, n_patches_w)
         """
         batch, c, h, w = x.shape
+        # print(f"DEBUG: LinearPatchEmbedding input: {x.shape}")
 
         # Extract patches: (B, C, H, W) -> (B, n_patches, patch_dim)
-        x = x.unfold(2, self.patch_size[0], self.patch_size[0])  # (B, C, nH, W, pH)
-        x = x.unfold(3, self.patch_size[1], self.patch_size[1])  # (B, C, nH, nW, pH, pW)
-        x = x.permute(0, 2, 3, 1, 4, 5)  # (B, nH, nW, C, pH, pW)
-        x = x.reshape(batch, self.n_patches, -1)  # (B, n_patches, patch_dim)
+        # Using unfold (already correct logic theoretically, but dimensions must match)
+
+        # Check simple case: H, W divisible by patch size?
+        if h % self.patch_size[0] != 0 or w % self.patch_size[1] != 0:
+            print(f"ERROR: Image size {h}x{w} not divisible by patch size {self.patch_size}")
+
+        # Original:
+        # x = x.unfold(2, self.patch_size[0], self.patch_size[0])  # (B, C, nH, W, pH)
+        # x = x.unfold(3, self.patch_size[1], self.patch_size[1])  # (B, C, nH, nW, pH, pW)
+        # x = x.permute(0, 2, 3, 1, 4, 5)  # (B, nH, nW, C, pH, pW)
+        # x = x.reshape(batch, self.n_patches, -1)  # (B, n_patches, patch_dim)
+
+        # Retrying to locate error with prints? No, error is "shape '[64, 196, -1]' is invalid for input of size 196608"
+        # 196608 is the size of the tensor BEFORE reshape.
+        # Target shape: [64, 196, -1]
+        # 64 * 196 = 12544
+        # 196608 / 12544 = 15.67... NOT INTEGER.
+
+        # Input 'x' to these unfolds is 196608 elements?
+        # If x is [64, 3, 32, 32], numel is 196608.
+        # 32x32 image, patch size 16?
+        # n_patches_h = 32 // 16 = 2
+        # n_patches_w = 32 // 16 = 2
+        # n_patches = 4.
+        # But error says "shape [64, 196, -1]".
+        # 196 patches => 14x14 grid.
+        # This implies the model thinks img_size is 224 (224/16 = 14).
+        # BUT input x comes from CIFAR-10 which is 32x32!
+
+        # ROOT CAUSE FOUND: CVKANImageClassifier default img_size=224, but used on CIFAR (32x32).
+        # Need to pass correct img_size to model constructor.
+
+        x = x.unfold(2, self.patch_size[0], self.patch_size[0])
+        x = x.unfold(3, self.patch_size[1], self.patch_size[1])
+        x = x.permute(0, 2, 3, 1, 4, 5)
+        x = x.reshape(batch, self.n_patches, -1)
 
         # Project to complex space
         real = self.proj_real(x)
@@ -176,57 +211,28 @@ class ConvPatchEmbedding(nn.Module):
 
         # Flatten spatial dims to patches
         B, D, H, W = z.shape
-        z = z.flatten(2).transpose(1, 2)  # (B, H*W, D)
+        z = z.flatten(2)  # (B, D, N) where N=H*W
+        z = z.transpose(1, 2)  # (B, N, D)
 
         return z, (H, W)
 
 
-class CVKANImageClassifier(BaseCVKAN):
+class ImageEmbedding(nn.Module):
     """
-    CV-KAN model for image classification.
-
-    Architecture:
-    1. Patch embedding: Image -> patches -> complex embeddings
-    2. Optional 2D positional encoding
-    3. Stack of CV-KAN layers with global aggregation
-    4. Log-magnitude centering (from BaseCVKAN)
-    5. Global pooling -> magnitude features -> classifier
-
-    Args:
-        img_size: Input image size
-        patch_size: Patch size for embedding
-        in_channels: Number of input channels (3 for RGB)
-        d_complex: Complex representation dimension
-        n_layers: Number of CV-KAN layers
-        n_classes: Number of output classes
-        kan_hidden: Hidden size for KAN MLPs
-        pos_encoding: 'sinusoidal', 'learnable', or None
-        pooling: 'mean', 'max', or 'attention'
-        center_magnitudes: Whether to center log-magnitudes (recommended)
+    Composite embedding for images: Patch Embedding + Positional Encoding.
+    Satisfies Embedding protocol.
     """
 
     def __init__(
         self,
-        img_size: int = 224,
-        patch_size: int = 16,
-        in_channels: int = 3,
-        d_complex: int = 64,
-        n_layers: int = 6,
-        n_classes: int = 1000,
-        kan_hidden: int = 32,
-        pos_encoding: Literal["sinusoidal", "learnable"] | None = "sinusoidal",
-        pooling: Literal["mean", "max", "attention"] = "mean",
-        embedding_type: Literal["linear", "conv"] = "linear",
-        center_magnitudes: bool = True,
+        img_size,
+        patch_size,
+        in_channels,
+        d_complex,
+        embedding_type="linear",
+        pos_encoding="sinusoidal",
     ):
-        # Initialize base class
-        super().__init__(
-            d_complex=d_complex,
-            n_layers=n_layers,
-            kan_hidden=kan_hidden,
-            pooling=pooling,
-            center_magnitudes=center_magnitudes,
-        )
+        super().__init__()
 
         # Patch embedding
         if embedding_type == "conv":
@@ -243,6 +249,7 @@ class CVKANImageClassifier(BaseCVKAN):
                 in_channels=in_channels,
                 d_complex=d_complex,
             )
+
         n_patches_h = self.patch_embed.n_patches_h
         n_patches_w = self.patch_embed.n_patches_w
 
@@ -262,70 +269,7 @@ class CVKANImageClassifier(BaseCVKAN):
         else:
             self.pos_encoding = None
 
-        # Classification head
-        self.classifier = build_classifier_head(
-            d_complex=d_complex,
-            n_classes=n_classes,
-            hidden_dim=kan_hidden * 2,
-        )
-
-        # Pooling
-        if pooling == "attention":
-            self.attention_pool = AttentionPool2d(in_channels=d_complex)
-
-        self.spatial_shape = (n_patches_h, n_patches_w)
-
-    def _pool(self, z: torch.Tensor) -> torch.Tensor:
-        """Override pooling to support attention pooling."""
-        if self.pooling_strategy == "attention":
-            # z is (B, N, d_complex) - complex
-            # We want to pool based on magnitude or learn attention over complex?
-            # AttentionPool2d expects Real input.
-            # Let's pool the Real and Imag parts separately with shared attention or operate on Magnitude?
-
-            # Alternative: Attention over complex vectors using magnitude for scoring?
-            # Or just separate attention for Real/Imag.
-
-            # Let's assume we treat Real and Imag as 2*D features for attention scoring,
-            # but we want to return a Complex result.
-
-            # For simplicity: Use AttentionPool2d on the concatenation of Real/Imag,
-            # but that gives a Real output.
-
-            # Better strategy: Apply AttentionPool2d to Real and Imag separately
-            # (which means different attention for real/imag components - flexible).
-
-            real = z.real
-            imag = z.imag
-
-            # We need to share the attention weights if we want phase coherence?
-            # But AttentionPool2d computes weights internally.
-
-            # Let's use the provided AttentionPool2d on Real and Imag separately for now.
-            pooled_real = self.attention_pool(real)
-            pooled_imag = self.attention_pool(imag)
-            return torch.complex(pooled_real, pooled_imag)
-
-        return super()._pool(z)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        return_features: bool = False,
-    ) -> dict:
-        """
-        Forward pass for image classification.
-
-        Args:
-            x: Image tensor of shape (batch, channels, height, width)
-            return_features: If True, return intermediate features
-
-        Returns:
-            Dictionary with:
-                - logits: Classification logits (batch, n_classes)
-                - features: Magnitude features (if return_features=True)
-                - pooled: Pooled complex representation (if return_features=True)
-        """
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Patch embedding
         z, spatial_shape = self.patch_embed(x)  # (batch, n_patches, d_complex)
 
@@ -333,21 +277,115 @@ class CVKANImageClassifier(BaseCVKAN):
         if self.pos_encoding is not None:
             z = self.pos_encoding(z, spatial_shape=spatial_shape)
 
-        # Apply CV-KAN layers with magnitude centering (from base class)
-        z = self._apply_layers(z)
+        return z
 
-        # Pool across patches (from base class)
+
+class ImageClassificationHead(nn.Module):
+    """
+    Classification head for images.
+    Supports special MLP-based AttentionPool2d.
+    """
+
+    def __init__(self, d_complex, n_classes, kan_hidden, pooling, dropout):
+        super().__init__()
+        self.pooling_type = pooling
+        self.d_complex = d_complex
+
+        if pooling == "attention":
+            # Image-specific attention pool (MLP based)
+            self.attention_pool = AttentionPool2d(in_channels=d_complex)
+        else:
+            # Fallback to standard pooling logic (placeholder)
+            pass
+
+        self.classifier = build_classifier_head(
+            d_complex=d_complex,
+            n_classes=n_classes,
+            hidden_dim=kan_hidden * 2,  # Note: Image model used *2 in original code
+            dropout=dropout,
+        )
+
+    def _pool(self, z: torch.Tensor) -> torch.Tensor:
+        if self.pooling_type == "attention":
+            # Apply AttentionPool2d to Real and Imag separately
+            real = z.real
+            imag = z.imag
+
+            pooled_real = self.attention_pool(real)
+            pooled_imag = self.attention_pool(imag)
+            return torch.complex(pooled_real, pooled_imag)
+
+        elif self.pooling_type == "mean":
+            return z.mean(dim=1)
+        elif self.pooling_type == "max":
+            # Simple max magnitude
+            mag = torch.abs(z)
+            _, indices = mag.max(dim=1)
+            batch_indices = torch.arange(z.size(0), device=z.device).unsqueeze(-1)
+            dim_indices = torch.arange(z.size(2), device=z.device).unsqueeze(0)
+            return z[batch_indices, indices, dim_indices]
+        else:
+            raise ValueError(f"Unknown pooling: {self.pooling_type}")
+
+    def forward(self, z: torch.Tensor, mask: torch.Tensor = None) -> dict:
         pooled = self._pool(z)
-
-        # Extract magnitude features (from base class)
-        features = self._extract_features(pooled)
-
-        # Classify
+        features = torch.abs(pooled)
         logits = self.classifier(features)
 
-        output = {"logits": logits}
-        if return_features:
-            output["features"] = features
-            output["pooled"] = pooled
+        return {"logits": logits, "pooled": pooled, "features": features}
 
-        return output
+
+class CVKANImageClassifier(CVKAN):
+    """
+    CV-KAN model for image classification (Composition-based).
+    """
+
+    def __init__(
+        self,
+        img_size: int = 224,
+        patch_size: int = 16,
+        in_channels: int = 3,
+        d_complex: int = 64,
+        n_layers: int = 6,
+        n_classes: int = 1000,
+        kan_hidden: int = 32,
+        pos_encoding: Literal["sinusoidal", "learnable"] | None = "sinusoidal",
+        pooling: Literal["mean", "max", "attention"] = "mean",
+        embedding_type: Literal["linear", "conv"] = "linear",
+        center_magnitudes: bool = True,
+        dropout: float = 0.0,
+        **kwargs,  # Ignore extra args
+    ):
+        # 1. Config (for Backbone)
+        config = CVKANConfig(
+            d_complex=d_complex,
+            n_layers=n_layers,
+            kan_hidden=kan_hidden,
+            center_magnitudes=center_magnitudes,
+            dropout=dropout,
+            input_type="real",  # Images are real
+        )
+
+        # 2. Components
+        embedding = ImageEmbedding(
+            img_size=img_size,
+            patch_size=patch_size,
+            in_channels=in_channels,
+            d_complex=d_complex,
+            embedding_type=embedding_type,
+            pos_encoding=pos_encoding,
+        )
+
+        backbone = CVKANBackbone(config)
+
+        # Use specialized ImageClassificationHead if pooling is attention (for MLP capability)
+        # or if we want to match legacy classifier width (kan_hidden * 2)
+        head = ImageClassificationHead(
+            d_complex=d_complex,
+            n_classes=n_classes,
+            kan_hidden=kan_hidden,
+            pooling=pooling,
+            dropout=dropout,
+        )
+
+        super().__init__(embedding, backbone, head)

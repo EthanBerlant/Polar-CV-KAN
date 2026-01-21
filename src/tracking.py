@@ -73,6 +73,11 @@ class ExperimentTracker:
 
     def __enter__(self) -> "ExperimentTracker":
         """Start MLflow run."""
+        import logging
+
+        logging.getLogger("mlflow").setLevel(logging.ERROR)
+        logging.getLogger("alembic").setLevel(logging.ERROR)
+
         mlflow.set_experiment(self.experiment_name)
         self._run = mlflow.start_run(run_name=self.run_name, tags=self.tags)
         self._run_id = self._run.info.run_id

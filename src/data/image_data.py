@@ -171,6 +171,10 @@ def create_cifar100_dataloader(
     return train_loader, val_loader, test_loader, 100
 
 
+def grayscale_to_rgb(x):
+    return x.repeat(3, 1, 1)
+
+
 def create_fashionmnist_dataloader(
     root: str = "./data/fashionmnist",
     batch_size: int = 64,
@@ -200,7 +204,7 @@ def create_fashionmnist_dataloader(
             transforms.Resize(image_size),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Lambda(lambda x: x.repeat(3, 1, 1)),  # Grayscale to RGB
+            transforms.Lambda(grayscale_to_rgb),  # Grayscale to RGB
             transforms.Normalize((0.2860,) * 3, (0.3530,) * 3),
         ]
     )
@@ -209,7 +213,7 @@ def create_fashionmnist_dataloader(
         [
             transforms.Resize(image_size),
             transforms.ToTensor(),
-            transforms.Lambda(lambda x: x.repeat(3, 1, 1)),  # Grayscale to RGB
+            transforms.Lambda(grayscale_to_rgb),  # Grayscale to RGB
             transforms.Normalize((0.2860,) * 3, (0.3530,) * 3),
         ]
     )
