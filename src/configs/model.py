@@ -24,6 +24,7 @@ class CVKANConfig(ModelConfig):
     aggregation_type: Literal["mean", "causal", "window", "neighborhood"] = "mean"
     n_heads: int = 8
     n_classes: int = 2
+    skip_connections: bool = False
 
 
 @dataclass

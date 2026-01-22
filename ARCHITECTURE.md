@@ -88,9 +88,9 @@ This discovery validates the polarization hypothesis: magnitude IS the attention
 
 | Approach | Status | Description |
 |----------|--------|-------------|
-| `EmergentHeadsPolarizing` | 🔒 | Implicit heads via dimension diversity (recommended) |
-| `PhaseOffsetPolarizing` | 🧪 | Explicit heads with fixed phase rotations |
-| `FactoredHeadsPolarizing` | 🧪 | Decoupled phase/magnitude processing |
+| `EmergentHeadsPolarizing` | 🔒 | Implicit heads via dimension diversity (STANDARD) |
+| `PhaseOffsetPolarizing` | ⚠️ | Explicit heads with fixed phase rotations (DEMO ONLY) |
+| `FactoredHeadsPolarizing` | ⚠️ | Decoupled phase/magnitude processing (DEMO ONLY) |
 
 ### Aggregation (`src/modules/aggregation.py`)
 
@@ -146,7 +146,40 @@ Computing `atan2` and then `sin`/`cos` introduces unnecessary discontinuities. W
 1. Create model in `src/models/cv_kan_{domain}.py`
 2. Handle domain-specific input preprocessing (patches, STFT, etc.)
 3. Use shared `PolarizingBlock` stack from base
-4. Add training script in `experiments/train_{domain}.py`
+4. Add domain adapter in `experiments/domains/{domain}.py`
+
+---
+
+## Experiment Structure
+
+### Unified Entry Points
+
+| Script | Purpose |
+|--------|---------|
+| `experiments/train.py` | Single training entrypoint for all domains |
+| `experiments/run_benchmark.py` | Batch benchmarking across domains |
+
+### Domain Adapters (`experiments/domains/`)
+
+Each domain module provides:
+- `create_model(config)` — Model factory
+- `create_dataloaders(model_config, train_config)` — Data loader factory
+- `Trainer` (optional) — Domain-specific trainer subclass
+
+### Analysis Tools (`experiments/analysis/`)
+
+| Script | Purpose |
+|--------|---------|
+| `visualize.py` | Phase/magnitude visualization from checkpoints |
+| `analyze_curves.py` | Training curve analysis |
+| `run_diagnostics.py` | Per-sample diagnostic analysis |
+
+### Baselines (`experiments/baselines/`)
+
+| Script | Purpose |
+|--------|---------|
+| `base_trainer.py` | Shared training infrastructure |
+| `*_baseline.py` | Individual baseline model definitions |
 
 ---
 
@@ -158,7 +191,6 @@ Computing `atan2` and then `sin`/`cos` introduces unnecessary discontinuities. W
 | `*Block` | `PolarizingBlock`, `PhaseAttentionBlock` | Layer-level components |
 | `*Aggregation` | `LocalWindowAggregation` | Aggregation strategies |
 | `Complex*` | `ComplexLayerNorm` | Complex-valued utilities |
-| `train_*.py` | `train_sst2.py` | Training scripts |
 
 ---
 

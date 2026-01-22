@@ -1,5 +1,5 @@
 import torch
-import torch.nn as nn
+from torch import nn
 
 from ..configs.model import CVKANConfig
 from ..modules.aggregation import (
@@ -18,8 +18,7 @@ from ..modules.polarizing_block import PolarizingBlock
 
 
 class CVKANBackbone(nn.Module):
-    """
-    Standard CV-KAN backbone consisting of a stack of PolarizingBlocks (or variants).
+    """Standard CV-KAN backbone consisting of a stack of PolarizingBlocks (or variants).
     Responsible for:
     - Stacking layers
     - Applying layers sequentially
@@ -37,14 +36,13 @@ class CVKANBackbone(nn.Module):
 
         if t == "mean":
             return GlobalMeanAggregation(), True
-        elif t == "causal":
+        if t == "causal":
             return CausalAggregation(), False
-        elif t == "window":
+        if t == "window":
             return LocalWindowAggregation(window_size=3), True  # Default window
-        elif t == "neighborhood":
+        if t == "neighborhood":
             return NeighborhoodAggregation(), True
-        else:
-            return GlobalMeanAggregation(), True
+        return GlobalMeanAggregation(), True
 
     def _build_layers(self) -> nn.ModuleList:
         layers = nn.ModuleList()
@@ -98,8 +96,7 @@ class CVKANBackbone(nn.Module):
         return layers
 
     def _center_log_magnitudes(self, Z: torch.Tensor) -> torch.Tensor:
-        """
-        Center log-magnitudes across tokens to prevent drift.
+        """Center log-magnitudes across tokens to prevent drift.
         Preserves relative magnitudes (attention) but keeps absolute scale bounded.
         """
         mag = torch.abs(Z)
@@ -118,7 +115,10 @@ class CVKANBackbone(nn.Module):
 
     def forward(self, z: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
         for layer in self.layers:
-            z = layer(z, mask=mask)
+            if getattr(self.config, "skip_connections", False):
+                z = z + layer(z, mask=mask)
+            else:
+                z = layer(z, mask=mask)
 
             if self.config.center_magnitudes:
                 z = self._center_log_magnitudes(z)

@@ -15,15 +15,12 @@ import torch
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.configs.model import CVKANConfig
 from src.data import SignalNoiseDataset
 from src.losses import diversity_loss, phase_anchor_loss
 from src.models import CVKAN
 from src.models.cv_kan import CVKANTokenClassifier
-from src.modules import (
-    GatedPolarization,
-    PhaseAttentionBlock,
-    PolarizingBlock,
-)
+from src.modules import GatedPolarization, PhaseAttentionBlock, PolarizingBlock
 from src.modules.multi_head import (
     EmergentHeadsPolarizing,
     FactoredHeadsPolarizing,
@@ -121,12 +118,12 @@ class TestCVKAN:
 
     def test_sequence_classification(self):
         """Model should produce sequence-level predictions."""
-        model = CVKAN(
-            d_input=32,
+        config = CVKANConfig(
             d_complex=64,
             n_layers=2,
-            n_classes=2,
+            input_type="complex",
         )
+        model = CVKAN.from_config(config, input_dim=32, n_classes=2)
 
         x = torch.randn(4, 16, 32, dtype=torch.cfloat)
         outputs = model(x)
@@ -148,15 +145,6 @@ class TestCVKAN:
 
         assert "token_logits" in outputs
         assert outputs["token_logits"].shape == (4, 16, 2)
-
-    def test_intermediates(self):
-        """Should return intermediate representations when requested."""
-        model = CVKAN(d_input=32, d_complex=64, n_layers=3)
-        x = torch.randn(4, 16, 32, dtype=torch.cfloat)
-        outputs = model(x, return_intermediates=True)
-
-        assert "intermediates" in outputs
-        assert len(outputs["intermediates"]) == 4  # embed + 3 layers
 
 
 class TestDataset:

@@ -5,8 +5,10 @@ from pathlib import Path
 from typing import Any
 
 import torch
-import torch.nn as nn
+from torch import nn
 from tqdm import tqdm
+
+from .utils import cleanup_gpu
 
 
 class EarlyStopper:
@@ -39,8 +41,8 @@ class EarlyStopper:
     def _is_better(self, current: float, best: float) -> bool:
         if self.mode == "min":
             return current < (best - self.min_delta)
-        else:  # mode == 'max'
-            return current > (best + self.min_delta)
+        # mode == 'max'
+        return current > (best + self.min_delta)
 
 
 class BaseTrainer:
@@ -230,15 +232,17 @@ class BaseTrainer:
                 }
             )
 
+            # Periodic GPU memory cleanup to prevent OOM
+            cleanup_gpu()
+
             # Checkpoint best
             val_score = val_metrics[metric_name]
             is_best = False
             if self.args.metric_mode == "min":
                 if val_score < self.best_val_metric:
                     is_best = True
-            else:
-                if val_score > self.best_val_metric:
-                    is_best = True
+            elif val_score > self.best_val_metric:
+                is_best = True
 
             if is_best:
                 self.best_val_metric = val_score

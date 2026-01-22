@@ -13,6 +13,7 @@ from .image_data import (
 )
 from .image_extension import create_tinyimagenet_dataloader
 from .nlp_loader import NLPDataLoader
+from .precomputed_audio import create_precomputed_audio_dataloader
 from .synthetic import SignalNoiseDataset, create_signal_noise_dataloader
 from .text import (
     TextDataset,
@@ -51,6 +52,7 @@ __all__ = [
     "create_audio_dataloader",
     "create_urbansound8k_dataloader",
     "create_esc50_dataloader",
+    "create_precomputed_audio_dataloader",
     "TORCHAUDIO_AVAILABLE",
     # Text
     "load_sst2",

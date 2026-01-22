@@ -57,19 +57,77 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = [
-    "E",   # pycodestyle errors
-    "F",   # Pyflakes
-    "I",   # isort
-    "UP",  # pyupgrade
-    "B",   # flake8-bugbear
-]
-ignore = [
-    "E501",  # line too long (handled by formatter)
-    "B008",  # function-call in default argument (common in PyTorch)
+    # Core
+    "E",    # pycodestyle errors
+    "F",    # Pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+
+    # Code quality
+    "C4",   # flake8-comprehensions - simplify list/dict comprehensions
+    "SIM",  # flake8-simplify - simplify code patterns
+    "PIE",  # flake8-pie - miscellaneous lints for cleaner code
+    "RET",  # flake8-return - check return statements
+    "PTH",  # flake8-use-pathlib - prefer pathlib over os.path
+    "PERF", # perflint - performance anti-patterns
+
+    # Duplication & complexity
+    "C90",  # mccabe complexity checker
+    "PL",   # pylint subset (PLR for refactor, PLC for convention)
+
+    # Documentation
+    "D",    # pydocstyle - docstring conventions
+
+    # Import hygiene
+    "TID",  # flake8-tidy-imports - import restrictions
+
+    # Type annotations
+    "ANN",  # flake8-annotations - function annotation checks
 ]
 
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "B008",   # function-call in default argument (common in PyTorch)
+    "D100",   # Missing docstring in public module
+    "D104",   # Missing docstring in public package
+    "D203",   # 1 blank line required before class docstring (conflicts with D211)
+    "D213",   # Multi-line docstring summary should start at the second line (conflicts with D212)
+    "ANN101", # Missing type annotation for `self`
+    "ANN102", # Missing type annotation for `cls`
+    "ANN401", # Dynamically typed expressions (Any) are disallowed
+    "PLR0913", # Too many arguments to function call (common in ML)
+    "PLR2004", # Magic value used in comparison (common in ML configs)
+]
+
+# Complexity thresholds
+[tool.ruff.lint.mccabe]
+max-complexity = 15  # Flag functions with cyclomatic complexity > 15
+
+[tool.ruff.lint.pylint]
+max-args = 10         # Allow up to 10 function arguments (ML models need many)
+max-branches = 15     # Maximum branches in a function
+max-statements = 75   # Maximum statements per function
+
 [tool.ruff.lint.isort]
-known-first-party = ["src"]
+known-first-party = ["src", "experiments"]
+section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.flake8-tidy-imports]
+# Prevent importing from deprecated or internal modules
+ban-relative-imports = "parents"  # Only allow relative imports from siblings/children
+
+[tool.ruff.lint.per-file-ignores]
+# Tests don't need docstrings or type annotations
+"tests/*" = ["D", "ANN", "PLR"]
+# Experiments can be more relaxed
+"experiments/*" = ["D", "ANN"]
+# Baseline scripts are simple entry points
+"experiments/baselines/*" = ["D", "ANN", "PLR0915"]
 
 [tool.coverage.run]
 source = ["src"]

@@ -10,28 +10,40 @@ description: How to run a tracked experiment with MLflow
 
 ## Quick Start
 
-Run experiments using the unified `train.py` with `--domain` flag:
+Run experiments using the unified `train.py` with `--domain` and `--preset` flags:
 
 ```powershell
 # Image classification (CIFAR-10)
 // turbo
-python experiments/train.py --domain image --epochs 100
+python experiments/train.py --domain image --preset cifar10 --epochs 100
 
-# Sentiment analysis (SST-2)
+# NLP / Sentiment analysis (SST-2)
 // turbo
-python experiments/train.py --domain sst2 --d_complex 64 --n_layers 2
+python experiments/train.py --domain nlp --preset sst2 --d_complex 64 --n_layers 2
 
 # Audio classification (Speech Commands)
 // turbo
-python experiments/train.py --domain audio --d_complex 128
+python experiments/train.py --domain audio --preset speech_commands --d_complex 128
 
 # Time series forecasting (ETTh1)
 // turbo
-python experiments/train.py --domain timeseries --pred_len 96
+python experiments/train.py --domain timeseries --preset etth1
+```
 
-# Synthetic signal/noise
+## Run Benchmarks
+
+```powershell
+# Quick pilot test across all domains
 // turbo
-python experiments/train.py --domain synthetic --task token
+python experiments/run_benchmark.py --pilot
+
+# Full overnight benchmark
+// turbo
+python experiments/run_benchmark.py --full
+
+# Specific domains only
+// turbo
+python experiments/run_benchmark.py --pilot --domains image nlp
 ```
 
 ## View Results in MLflow
@@ -47,7 +59,8 @@ Then open http://localhost:5000 in browser.
 
 | Parameter | Description | Typical Values |
 |-----------|-------------|----------------|
-| `--domain` | Task domain | image, audio, timeseries, sst2, synthetic |
+| `--domain` | Task domain | image, audio, timeseries, nlp |
+| `--preset` | Model/data preset | cifar10, sst2, etth1, speech_commands |
 | `--d_complex` | Complex dimension | 32, 64, 128, 256, 512 |
 | `--n_layers` | Number of polarizing layers | 2, 4, 6 |
 | `--pooling` | Pooling strategy | mean, max, attention |

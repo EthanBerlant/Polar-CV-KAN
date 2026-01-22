@@ -1,17 +1,20 @@
 import argparse
+import json
 import os
 import sys
 from dataclasses import asdict
+from datetime import datetime
 from importlib import import_module
 from pathlib import Path
 
-import torch
-
-# Add project root to path
+# Add project root to path BEFORE importing from src
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import torch
 
 from src.configs import TrainingConfig, get_preset
 from src.tracking import ExperimentTracker
+from src.utils import cleanup_gpu
 
 
 def load_domain_module(domain_name):
@@ -39,6 +42,7 @@ def main():
     parser.add_argument("--pooling", type=str, help="Override pooling")
     parser.add_argument("--dropout", type=float, help="Override dropout")
     parser.add_argument("--embedding_type", type=str, help="Override embedding_type (image only)")
+    parser.add_argument("--skip_connections", action="store_true", help="Enable skip connections")
 
     parser.add_argument("--subset_size", type=int, help="Limit dataset size")
     parser.add_argument("--patience", type=int, help="Early stopping patience")
@@ -67,16 +71,36 @@ def main():
         model_config.dropout = args.dropout
     if args.embedding_type and hasattr(model_config, "embedding_type"):
         model_config.embedding_type = args.embedding_type
+    if args.skip_connections:
+        model_config.skip_connections = True
+
+    # Create unique run dir
+    # If run_name provided use it, else generic
+    run_name = args.run_name or args.preset or "custom_run"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = Path(args.output_dir) / args.domain / f"{run_name}_{timestamp}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save Combined Config
+    # We construct combined_args later, but good to save initial intent here or later.
 
     # Training config
     train_config = TrainingConfig(
-        output_dir=args.output_dir,
+        output_dir=str(run_dir),  # Update to unique dir
         epochs=args.epochs if args.epochs else 50,
         batch_size=args.batch_size if args.batch_size else 32,
         subset_size=args.subset_size,
         patience=args.patience if args.patience else 10,
         seed=args.seed if args.seed else 42,
     )
+
+    # Apply domain-specific defaults
+    if args.domain == "timeseries":
+        train_config.metric_name = "mse"
+        train_config.metric_mode = "min"
+    elif args.domain in ["nlp", "image", "audio"]:
+        train_config.metric_name = "accuracy"
+        train_config.metric_mode = "max"
 
     # 2. Load Domain Module
     domain = load_domain_module(args.domain)
@@ -99,8 +123,18 @@ def main():
     # Add other dynamic meta if needed
 
     # 4. Create Model
+    cleanup_gpu()  # Clear any residual GPU memory before model creation
     print(f"Creating model for {args.domain}...")
-    model = domain.create_model(model_config)
+
+    # Check for precomputed mode (audio domain)
+    use_precomputed = meta.get("use_precomputed", False)
+    if (
+        hasattr(domain.create_model, "__code__")
+        and "use_precomputed" in domain.create_model.__code__.co_varnames
+    ):
+        model = domain.create_model(model_config, use_precomputed=use_precomputed)
+    else:
+        model = domain.create_model(model_config)
 
     # 5. Setup Trainer
     # Domain module can provide a specific Trainer class or we use generic
@@ -136,15 +170,20 @@ def main():
         setattr(combined_args, k, v)
     combined_args.domain = args.domain
 
-    trainer = TrainerClass(
-        model=model,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        device=device,
-        output_dir=Path(train_config.output_dir),
-        args=combined_args,
-        use_amp=train_config.amp,
-    )
+    # Pass use_precomputed to trainer if it supports it (audio domain)
+    trainer_kwargs = {
+        "model": model,
+        "optimizer": optimizer,
+        "scheduler": scheduler,
+        "device": device,
+        "output_dir": Path(train_config.output_dir),
+        "args": combined_args,
+        "use_amp": train_config.amp,
+    }
+    if use_precomputed:
+        trainer_kwargs["use_precomputed"] = True
+
+    trainer = TrainerClass(**trainer_kwargs)
 
     # 6. Train
     print("Starting training...")
@@ -161,6 +200,30 @@ def main():
         )
 
         tracker.log_metrics({"train_time": train_time})
+
+        # Log all history to MLflow
+        for epoch_data in history:
+            step = epoch_data["epoch"]
+            # Flatten metrics
+            metrics = {}
+            for k, v in epoch_data["train"].items():
+                metrics[f"train_{k}"] = v
+            for k, v in epoch_data["val"].items():
+                metrics[f"val_{k}"] = v
+
+            tracker.log_metrics(metrics, step=step)
+
+        # Log final best
+        # Note: log_metrics already logs to MLflow, so history is preserved.
+
+    # Save config
+    with open(run_dir / "config.json", "w") as f:
+        json.dump(vars(combined_args), f, indent=2)
+
+    # Final cleanup to release GPU memory for next run
+    del model, trainer, optimizer, scheduler
+    cleanup_gpu()
+    print("Training complete. GPU memory released.")
 
 
 if __name__ == "__main__":

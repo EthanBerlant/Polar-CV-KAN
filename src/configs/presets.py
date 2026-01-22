@@ -23,6 +23,17 @@ PRESETS = {
         n_classes=35,
         dropout=0.1,
     ),
+    # Audio (fast) - smaller FFT for faster training
+    "speech_commands_fast": AudioConfig(
+        dataset_name="speech_commands",
+        d_complex=128,
+        n_layers=4,
+        n_fft=512,
+        hop_length=128,
+        pooling="attention",
+        n_classes=35,
+        dropout=0.1,
+    ),
     # Time Series
     "etth1": TimeSeriesConfig(
         dataset_name="etth1",

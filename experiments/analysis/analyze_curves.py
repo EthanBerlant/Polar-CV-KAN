@@ -3,7 +3,9 @@
 import json
 from pathlib import Path
 
-results_dir = Path("outputs/benchmark")
+# Get project root from file location
+project_root = Path(__file__).parent.parent.parent
+results_dir = project_root / "outputs" / "benchmark"
 
 print("=" * 90)
 print("TIMESERIES CV-KAN - Training Curve Analysis")

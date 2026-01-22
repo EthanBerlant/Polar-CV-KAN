@@ -16,8 +16,8 @@ from pathlib import Path
 import arg_parser
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 from torch.optim import SGD, Adam, AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.data.precomputed_audio import create_precomputed_audio_dataloader
 from src.models.base import BaseCVKAN, build_classifier_head
 from src.trainer import BaseTrainer
+from src.utils import cleanup_gpu
 
 
 class CVKANAudioPrecomputed(BaseCVKAN):
@@ -135,20 +136,18 @@ def parse_args():
     parser.add_argument("--data_root", type=str, default="./data/speech_commands_stft")
     parser.add_argument("--n_freq", type=int, default=257)  # n_fft=512 -> 257
 
-    # Output
-    parser.add_argument("--output_dir", type=str, default="outputs/audio")
-
-    # Set defaults
+    # Set defaults for audio domain
     parser.set_defaults(
-        batch_size=256,
         d_complex=128,
         n_layers=4,
         epochs=30,
         save_every=10,
+        output_dir="outputs/audio",
     )
 
     args = parser.parse_args()
     args.metric_mode = "max"
+    args.domain = "audio"
     return args
 
 
@@ -185,6 +184,9 @@ def main():
         batch_size=args.batch_size,
     )
     print(f"Classes: {n_classes}, Train batches: {len(train_loader)}")
+
+    # Clear GPU memory before model creation
+    cleanup_gpu()
 
     # Create model
     print("Creating model...")
@@ -250,6 +252,10 @@ def main():
 
     print(f"\nTraining complete! Total time: {total_time/3600:.2f} hours")
     print(f"Results saved to {output_dir}")
+
+    # Final cleanup to release GPU memory
+    del model, trainer, optimizer, scheduler
+    cleanup_gpu()
 
     return results
 

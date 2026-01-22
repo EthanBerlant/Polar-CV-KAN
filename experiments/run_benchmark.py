@@ -104,6 +104,16 @@ class BenchmarkRunner:
             "metrics": ["test_acc", "best_val_acc"],
             "preset": "speech_commands",
         },
+        "nlp": {
+            "epochs": 30,
+            "patience": 10,
+            "script": "experiments/train.py",
+            "baseline_script": "experiments/baselines/lstm_text_baseline.py",
+            "pilot_epochs": 3,
+            "pilot_subset": 1000,
+            "metrics": ["test_acc", "best_val_acc"],
+            "preset": "sst2",
+        },
     }
 
     def __init__(
@@ -133,7 +143,7 @@ class BenchmarkRunner:
         Interleaves domains horizontally (round-robin) rather than running
         all experiments for one domain before moving to the next.
         """
-        domains = domains or ["timeseries", "image", "audio"]
+        domains = domains or ["timeseries", "image", "audio", "nlp"]
         model_types = ["cvkan", "baseline"]
 
         seeds = [42] if self.pilot else self.SEEDS
@@ -333,6 +343,7 @@ class BenchmarkRunner:
                 cwd=str(Path(__file__).parent.parent),
                 timeout=7200,  # 2 hour timeout per experiment
                 env=env,
+                check=False,
             )
 
             train_time = time.time() - start_time
@@ -566,7 +577,7 @@ def main():
         "--domains",
         type=str,
         nargs="+",
-        choices=["image", "timeseries", "audio"],
+        choices=["image", "timeseries", "audio", "nlp"],
         help="Specific domains to run (default: all)",
     )
     parser.add_argument(

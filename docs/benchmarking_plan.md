@@ -112,19 +112,55 @@ Both modes provide meaningful insights—parameter-matching tests raw efficiency
 
 ---
 
-## Implementation Roadmap
+## Domain 4: NLP (Text Classification)
 
-### Phase 1: Data Preparation
-- Create `src/data/` loaders for CIFAR-10, ETTh1, and Speech Commands.
-- Ensure efficient caching and pre-processing (especially for STFT).
+### Dataset
+**SST-2** (Stanford Sentiment Treebank)
+- **Why**: Standard binary sentiment classification benchmark.
+- **Input**: Variable-length text sequences.
 
-### Phase 2: Adaptation Scripts
-Create new training scripts in `experiments/`:
-1.  `train_image.py`: Adapts `train_synthetic.py` loop for image dataloaders.
-2.  `train_timeseries.py`: Implements sliding window logic for forecasting.
-3.  `train_audio.py`: Handles audio IO and on-the-fly spectrograms.
+### Baselines
+1.  **Bi-LSTM**
+    - *Rationale*: Classic sequence model for text.
+2.  **Transformer-Tiny**
+    - *Rationale*: Modern attention-based baseline.
 
-### Phase 3: Execution
-1.  **Pilot Run**: Rapid training on small subsets (10%) to verify pipeline.
-2.  **Parameter Tuning**: Adjust CV-KAN width/depth to match baseline parameter counts.
-3.  **Full Benchmark**: Run full training for all domains.
+### CV-KAN Configuration
+- **Model**: `CVKANNLP`
+- **Key Hyperparams**:
+    - `max_seq_len`: 64 (for SST-2)
+    - `input_type`: `real` (embeddings are real-valued)
+    - `pooling`: Compare `mean` vs `attention`.
+
+### Metrics
+- Classification Accuracy
+
+---
+
+## Implementation
+
+### Unified Entry Points
+
+All benchmarking uses two consolidated scripts:
+
+1. **`experiments/train.py`** — Single training entrypoint for all domains
+   ```bash
+   python experiments/train.py --domain image --preset cifar10
+   python experiments/train.py --domain nlp --preset sst2
+   python experiments/train.py --domain timeseries --preset etth1
+   python experiments/train.py --domain audio --preset speech_commands
+   ```
+
+2. **`experiments/run_benchmark.py`** — Batch benchmarking across domains
+   ```bash
+   python experiments/run_benchmark.py --pilot             # Quick test
+   python experiments/run_benchmark.py --full              # Overnight run
+   python experiments/run_benchmark.py --domains image nlp # Specific domains
+   ```
+
+### Domain Adapters
+
+Each domain in `experiments/domains/` provides:
+- `create_model(config)` — Model factory
+- `create_dataloaders(model_config, train_config)` — Data loader factory
+- `Trainer` (optional) — Domain-specific trainer subclass

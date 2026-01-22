@@ -23,7 +23,9 @@ def add_common_args(parser):
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--optimizer", type=str, default="adamw", choices=["adam", "adamw", "sgd"])
     parser.add_argument("--warmup_epochs", type=int, default=5, help="Linear warmup epochs")
-    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument(
+        "--batch_size", type=int, default=128, help="Batch size (default: 128 to prevent OOM)"
+    )
 
     # Control
     parser.add_argument("--patience", type=int, default=10, help="Early stopping patience")

@@ -17,7 +17,7 @@ import numpy as np
 import torch
 
 # Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.data import create_signal_noise_dataloader
 from src.models.cv_kan import CVKANTokenClassifier

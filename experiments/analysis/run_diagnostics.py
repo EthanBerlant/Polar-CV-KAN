@@ -22,7 +22,7 @@ import torch
 import torch.nn.functional as F
 
 # Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.data.text import load_sst2, pad_collate
 from src.models import CVKAN
