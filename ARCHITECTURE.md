@@ -83,6 +83,7 @@ This discovery validates the polarization hypothesis: magnitude IS the attention
 | `PolarizingBlock` | 🔒 | Core primitive: aggregate → polar transform → broadcast |
 | `GatedPolarization` | 🔒 | Learnable interpolation between identity and polarization |
 | `PhaseAttentionBlock` | 🧪 | Explicit phase-based attention (alternative to implicit) |
+| `HierarchicalPolarization` | 🧪 | Recursive multi-scale polarization (polar error correction style) |
 
 ### Multi-Head Approaches (`src/modules/multi_head.py`)
 
@@ -97,6 +98,7 @@ This discovery validates the polarization hypothesis: magnitude IS the attention
 | Module | Status | Use Case |
 |--------|--------|----------|
 | `GlobalMeanAggregation` | 🔒 | Sequences (NLP) |
+| `MagnitudeWeightedAggregation` | 🧪 | Parameter-free attention via magnitude |
 | `LocalWindowAggregation` | 🧪 | Spatial data (images) |
 | `CausalAggregation` | 🧪 | Autoregressive tasks |
 

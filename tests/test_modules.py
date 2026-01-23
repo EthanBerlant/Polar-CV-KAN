@@ -21,11 +21,49 @@ from src.losses import diversity_loss, phase_anchor_loss
 from src.models import CVKAN
 from src.models.cv_kan import CVKANTokenClassifier
 from src.modules import GatedPolarization, PhaseAttentionBlock, PolarizingBlock
+from src.modules.aggregation import MagnitudeWeightedAggregation
 from src.modules.multi_head import (
     EmergentHeadsPolarizing,
     FactoredHeadsPolarizing,
     PhaseOffsetPolarizing,
 )
+
+
+class TestAggregation:
+    """Tests for aggregation strategies."""
+
+    def test_magnitude_weighted_shape(self):
+        """Output should be (batch, 1, d_complex)."""
+        agg = MagnitudeWeightedAggregation()
+        Z = torch.randn(4, 16, 32, dtype=torch.cfloat)
+        out = agg(Z)
+        assert out.shape == (4, 1, 32)
+
+    def test_magnitude_weighted_bias(self):
+        """Larger magnitude tokens should contribute more."""
+        agg = MagnitudeWeightedAggregation()
+
+        # Create sequence: one high-magnitude token, rest low
+        Z = torch.randn(1, 10, 8, dtype=torch.cfloat) * 0.1
+        Z[:, 0, :] = 10.0 + 0j  # Much larger magnitude
+
+        out = agg(Z)
+
+        # Output should be dominated by the high-mag token
+        expected = Z[:, 0:1, :]
+        similarity = torch.abs(out - expected).mean() / torch.abs(expected).mean()
+        assert similarity < 0.2  # Should be very close
+
+    def test_magnitude_weighted_with_mask(self):
+        """Masked tokens should not contribute."""
+        agg = MagnitudeWeightedAggregation()
+
+        Z = torch.randn(2, 4, 8, dtype=torch.cfloat)
+        mask = torch.ones(2, 4)
+        mask[:, -1] = 0  # Mask last token
+
+        out = agg(Z, mask=mask)
+        assert out.shape == (2, 1, 8)
 
 
 class TestPolarizingBlock:

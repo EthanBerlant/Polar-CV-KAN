@@ -1,5 +1,4 @@
-"""
-Aggregation strategies for CV-KAN.
+"""Aggregation strategies for CV-KAN.
 
 The core CV-KAN mechanism is: aggregate → polar transform → broadcast.
 These aggregation modules provide domain-specific strategies while keeping
@@ -7,19 +6,19 @@ the rest of the architecture unchanged.
 
 Strategies:
 - GlobalMeanAggregation: Standard global mean (text, general)
+- MagnitudeWeightedAggregation: Magnitude-weighted mean (parameter-free attention)
 - LocalWindowAggregation: 2D local windows (images, preserves spatial locality)
 - CausalAggregation: Cumulative causal mean (time series, autoregressive)
 - NeighborhoodAggregation: Graph neighborhood mean (GNNs)
 """
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
 
 class GlobalMeanAggregation(nn.Module):
-    """
-    Standard global mean aggregation.
+    """Standard global mean aggregation.
 
     This is the default behavior from the original PolarizingBlock.
     Suitable for text classification, general sequence tasks.
@@ -28,8 +27,7 @@ class GlobalMeanAggregation(nn.Module):
     """
 
     def forward(self, Z: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
-        """
-        Compute global mean over tokens.
+        """Compute global mean over tokens.
 
         Args:
             Z: Complex tensor of shape (batch, n_tokens, d_complex)
@@ -43,13 +41,47 @@ class GlobalMeanAggregation(nn.Module):
             sum_Z = (Z * mask_expanded).sum(dim=1, keepdim=True)
             count = mask_expanded.sum(dim=1, keepdim=True).clamp(min=1.0)
             return sum_Z / count
-        else:
-            return Z.mean(dim=1, keepdim=True)
+        return Z.mean(dim=1, keepdim=True)
+
+
+class MagnitudeWeightedAggregation(nn.Module):
+    """Magnitude-weighted mean aggregation (parameter-free).
+
+    Uses token magnitudes as implicit attention weights, creating
+    a feedback loop: polarized tokens contribute more to aggregates.
+
+    This is attention-free in the sense that no new parameters are
+    learned — it just reads the magnitude signal from previous layers.
+
+    Theoretically: if polarization produces magnitude as an importance
+    signal, this allows that signal to influence aggregation without
+    introducing learned attention weights.
+    """
+
+    def forward(self, Z: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+        """Compute magnitude-weighted mean over tokens.
+
+        Args:
+            Z: Complex tensor of shape (batch, n_tokens, d_complex)
+            mask: Optional binary mask (batch, n_tokens) where 1=valid, 0=pad
+
+        Returns:
+            Aggregated tensor of shape (batch, 1, d_complex)
+        """
+        # Mean magnitude across complex dims as weight
+        mag = torch.abs(Z).mean(dim=-1, keepdim=True)  # (batch, n_tokens, 1)
+
+        if mask is not None:
+            mag = mag * mask.unsqueeze(-1).float()
+
+        # Normalize weights to sum to 1
+        weights = mag / (mag.sum(dim=1, keepdim=True) + 1e-6)
+
+        return (Z * weights).sum(dim=1, keepdim=True)
 
 
 class LocalWindowAggregation(nn.Module):
-    """
-    Local 2D window aggregation for images.
+    """Local 2D window aggregation for images.
 
     Preserves spatial structure while keeping the polarization dynamic local.
     Aggregates over local windows instead of global mean.
@@ -59,7 +91,7 @@ class LocalWindowAggregation(nn.Module):
         stride: Stride of the window (default: 1, keeps same spatial size)
     """
 
-    def __init__(self, kernel_size: int = 7, stride: int = 1):
+    def __init__(self, kernel_size: int = 7, stride: int = 1) -> None:
         super().__init__()
         self.kernel_size = kernel_size
         self.stride = stride
@@ -71,8 +103,7 @@ class LocalWindowAggregation(nn.Module):
         mask: torch.Tensor | None = None,
         spatial_shape: tuple | None = None,
     ) -> torch.Tensor:
-        """
-        Compute local window mean for 2D spatial data.
+        """Compute local window mean for 2D spatial data.
 
         Args:
             Z: Complex tensor of shape (batch, H*W, d_complex) or (batch, H, W, d_complex)
@@ -90,7 +121,7 @@ class LocalWindowAggregation(nn.Module):
             if spatial_shape is None:
                 # Assume square
                 H = W = int(n_tokens**0.5)
-                assert H * W == n_tokens, f"Cannot infer spatial dims from {n_tokens} tokens"
+                assert n_tokens == H * W, f"Cannot infer spatial dims from {n_tokens} tokens"
             else:
                 H, W = spatial_shape
             Z = Z.view(batch, H, W, d_complex)
@@ -126,8 +157,7 @@ class LocalWindowAggregation(nn.Module):
 
 
 class CausalAggregation(nn.Module):
-    """
-    Causal cumulative mean aggregation for time series.
+    """Causal cumulative mean aggregation for time series.
 
     At each position t, the aggregate A_t is the mean of all tokens from 1 to t.
     This enables autoregressive processing where future tokens don't influence past.
@@ -136,8 +166,7 @@ class CausalAggregation(nn.Module):
     """
 
     def forward(self, Z: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
-        """
-        Compute causal cumulative mean.
+        """Compute causal cumulative mean.
 
         A_t = mean(Z_1, Z_2, ..., Z_t) for each t
 
@@ -164,17 +193,15 @@ class CausalAggregation(nn.Module):
             cumcount = torch.cumsum(mask_float, dim=1).clamp(min=1.0)
 
             return cumsum / cumcount
-        else:
-            # Simple causal cumsum
-            cumsum = torch.cumsum(Z, dim=1)
-            counts = torch.arange(1, seq_len + 1, device=device, dtype=Z.real.dtype)
-            counts = counts.view(1, -1, 1)  # (1, seq_len, 1)
-            return cumsum / counts
+        # Simple causal cumsum
+        cumsum = torch.cumsum(Z, dim=1)
+        counts = torch.arange(1, seq_len + 1, device=device, dtype=Z.real.dtype)
+        counts = counts.view(1, -1, 1)  # (1, seq_len, 1)
+        return cumsum / counts
 
 
 class NeighborhoodAggregation(nn.Module):
-    """
-    Graph neighborhood aggregation.
+    """Graph neighborhood aggregation.
 
     For each node, aggregates features from its neighbors as defined by
     an adjacency matrix or edge index.
@@ -186,7 +213,7 @@ class NeighborhoodAggregation(nn.Module):
         self_loop: Whether to include the node itself in aggregation
     """
 
-    def __init__(self, normalize: bool = True, self_loop: bool = True):
+    def __init__(self, normalize: bool = True, self_loop: bool = True) -> None:
         super().__init__()
         self.normalize = normalize
         self.self_loop = self_loop
@@ -198,8 +225,7 @@ class NeighborhoodAggregation(nn.Module):
         edge_index: torch.Tensor | None = None,
         mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        Compute neighborhood mean for graph data.
+        """Compute neighborhood mean for graph data.
 
         Args:
             Z: Complex tensor of shape (batch, n_nodes, d_complex) or (n_nodes, d_complex)

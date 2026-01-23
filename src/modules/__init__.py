@@ -9,9 +9,11 @@ from .aggregation import (
     CausalAggregation,
     GlobalMeanAggregation,
     LocalWindowAggregation,
+    MagnitudeWeightedAggregation,
     NeighborhoodAggregation,
 )
 from .gated_polarization import GatedPolarization
+from .hierarchical import HierarchicalPolarization
 from .multi_head import (
     EmergentHeadsPolarizing,
     FactoredHeadsPolarizing,
@@ -31,12 +33,14 @@ __all__ = [
     "PolarizingBlock",
     "GatedPolarization",
     "PhaseAttentionBlock",
+    "HierarchicalPolarization",
     # Multi-head variants
     "EmergentHeadsPolarizing",
     "PhaseOffsetPolarizing",
     "FactoredHeadsPolarizing",
     # Aggregation strategies
     "GlobalMeanAggregation",
+    "MagnitudeWeightedAggregation",
     "LocalWindowAggregation",
     "CausalAggregation",
     "NeighborhoodAggregation",

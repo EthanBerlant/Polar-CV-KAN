@@ -1,5 +1,11 @@
+import sys
+from pathlib import Path
+
 import pytest
 import torch
+
+# Add src to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.configs.model import CVKANConfig
 from src.models import CVKAN
