@@ -19,29 +19,40 @@ description: How to add a new module to the CV-KAN architecture
    - For aggregation: Add to `src/modules/aggregation.py`
    - For model: `src/models/cv_kan_yourname.py`
 
-2. **Follow the patterns**:
+2. **Implement with Registry**:
+   - Import the corresponding registry from `src.registry`
+   - Decorate your class with `@REGISTRY.register("name")`
+   
+   ```python
+   from ..registry import AGGREGATION_REGISTRY
+   from torch import nn
+   
+   @AGGREGATION_REGISTRY.register("my_new_agg")
+   class MyAggregation(nn.Module):
+       ...
+   ```
+
+3. **Follow the patterns**:
    - Use `torch.cfloat` dtype for complex operations
    - Include residual connections for stability
    - Document with docstrings
 
-3. **Export from package** - add to `src/modules/__init__.py`:
-   ```python
-   from .your_module import YourNewBlock
+4. **Verify Architecture Compliance**:
+   Run the linter to ensure you didn't bypass the factories:
+   // turbo
+   ```powershell
+   python scripts/lint_architecture.py
    ```
 
-4. **Update ARCHITECTURE.md**:
+5. **Update ARCHITECTURE.md**:
    - Add entry to appropriate table
    - Mark with 🧪 (experimental) initially
 
-5. **Add tests** to `tests/test_modules.py`:
+6. **Add tests** to `tests/test_modules.py` or a new test file:
    ```python
-   class TestYourNewBlock:
-       def test_forward_shape(self):
-           block = YourNewBlock(d_complex=32)
-           Z = torch.randn(4, 16, 32, dtype=torch.cfloat)
-           out = block(Z)
-           assert out.shape == Z.shape
-           assert out.dtype == torch.cfloat
+   def test_forward_shape():
+       # Ideally use the Factory to create it if possible, or direct instantiation for unit tests
+       pass
    ```
 
 6. **Run tests**:
