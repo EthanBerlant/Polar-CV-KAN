@@ -1,7 +1,7 @@
 from typing import Any
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from ..configs.model import CVKANConfig
 from .backbone import CVKANBackbone
@@ -10,8 +10,7 @@ from .protocols import Backbone, Embedding, Head
 
 
 class CVKAN(nn.Module):
-    """
-    Unified CV-KAN model using composition over inheritance.
+    """Unified CV-KAN model using composition over inheritance.
 
     Structure:
         Input -> Embedding -> Backbone -> Head -> Output
@@ -29,8 +28,7 @@ class CVKAN(nn.Module):
         self.head = head
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor = None, **kwargs) -> dict[str, Any]:
-        """
-        Standard forward pass.
+        """Standard forward pass.
         Returns dict for flexibility (logits, auxiliary outputs from head).
         """
         # 1. Embed (Real/Index -> Complex Sequence)
@@ -45,21 +43,19 @@ class CVKAN(nn.Module):
     @classmethod
     def from_config(cls, config: CVKANConfig, input_dim: int, n_classes: int):
         """Factory method to create a standard Sequence Classification CVKAN."""
-
         # 1. Standard Embedding
         if config.input_type == "real":
             embedding = ComplexEmbedding(input_dim, config.d_complex)
+        # Identity/Passthrough embedding for complex inputs (synthetic)
+        elif input_dim != config.d_complex:
+            embedding = ComplexProjection(input_dim, config.d_complex)
         else:
-            # Identity/Passthrough embedding for complex inputs (synthetic)
-            if input_dim != config.d_complex:
-                embedding = ComplexProjection(input_dim, config.d_complex)
-            else:
 
-                class IdentityComplexEmbedding(nn.Module):
-                    def forward(self, x):
-                        return x
+            class IdentityComplexEmbedding(nn.Module):
+                def forward(self, x):
+                    return x
 
-                embedding = IdentityComplexEmbedding()
+            embedding = IdentityComplexEmbedding()
 
         # 2. Standard Backbone
         backbone = CVKANBackbone(config)
@@ -80,9 +76,7 @@ class CVKAN(nn.Module):
 
 
 class StandardClassificationHead(nn.Module):
-    """
-    Standard head: Pooling -> Magnitude -> Classifier.
-    """
+    """Standard head: Pooling -> Magnitude -> Classifier."""
 
     def __init__(self, d_complex, n_classes, kan_hidden, pooling, dropout):
         super().__init__()
@@ -104,10 +98,9 @@ class StandardClassificationHead(nn.Module):
                 sum_z = (z * mask_expanded).sum(dim=1)
                 count = mask_expanded.sum(dim=1).clamp(min=1.0)
                 return sum_z / count
-            else:
-                return z.mean(dim=1)
+            return z.mean(dim=1)
 
-        elif self.pooling_type == "max":
+        if self.pooling_type == "max":
             mag = torch.abs(z)
             if mask is not None:
                 mag = mag.masked_fill(mask.unsqueeze(-1) == 0, -1e9)
@@ -125,7 +118,7 @@ class StandardClassificationHead(nn.Module):
             dim_indices = torch.arange(z.size(2), device=z.device).unsqueeze(0)
             return z[batch_indices, indices, dim_indices]
 
-        elif self.pooling_type == "attention":
+        if self.pooling_type == "attention":
             # Simple dot-product attention with learnable query
             # Query: (1, 1, d)
             # Keys: z (b, n, d)
@@ -140,8 +133,76 @@ class StandardClassificationHead(nn.Module):
             attn = torch.softmax(scores, dim=1).unsqueeze(-1)  # (b, n, 1)
             return (z * attn).sum(dim=1)
 
-        else:
-            raise ValueError(f"Unknown pooling: {self.pooling_type}")
+        if self.pooling_type == "covariance":
+            # Second-order pooling (Correlation between feature dimensions)
+            # z: (B, N, D)
+            # Output: (B, D) - Diagonal of Gram matrix? Or Flattened?
+            # Standard Covariance pooling usually returns (B, D*(D+1)/2) but we need to stay in d_complex dimension?
+            # Let's do a simplified version: Global Average Pooling of the Gram Matrix diagonal (Correlation magnitude)
+            # Or: We project the Gram Matrix back to D dimensions?
+
+            # Alternative: "Attentive Covariance" or just Gram Matrix diagonal.
+            # Let's try: Centered Covariance -> Diagonal (Variance) as a starting point for "texture"
+            # BUT variance is just Mean(Mag^2).
+            # True covariance captures inter-channel deps.
+
+            # Implementation:
+            # 1. Center features: z_centered = z - mean(z)
+            # 2. Gram: G = z_c.H @ z_c  (B, D, D)
+            # 3. We typically flatten this for classification, but our head expects (B, D).
+            # Constraint: Output must be (B, D) complex.
+            # Strategy: Return the principal components or just the diagonal?
+            # Let's go with: Mean + Variance encoded in Real/Imag?
+
+            # Let's check literature/user intent: "Excellent for texture".
+            # Usually requires a classifier that takes (D, D).
+            # Given our architecture (Backbone -> Head(Linear(D))), we MUST output (B, D).
+            # So Covariance *Pooling* in this specific pipeline might be "Global Variance Pooling".
+            # z_mean = z.mean(dim=1)
+            # z_var = ((z - z_mean.unsqueeze(1)) * (z - z_mean.unsqueeze(1)).conj()).mean(dim=1)
+            # return z_mean + z_var  (Superposition of 1st and 2nd moments)
+
+            if mask is not None:
+                # Masking logic needed
+                mask_expanded = mask.unsqueeze(-1)
+                count = mask_expanded.sum(dim=1).clamp(min=1.0)
+                mean = (z * mask_expanded).sum(dim=1) / count
+                centered = (z - mean.unsqueeze(1)) * mask_expanded
+                cov = (centered * centered.conj()).sum(dim=1) / count
+            else:
+                mean = z.mean(dim=1)
+                cov = ((z - mean.unsqueeze(1)) * (z - mean.unsqueeze(1)).conj()).mean(dim=1)
+
+            return mean + cov  # Encode both moments
+
+        if self.pooling_type == "spectral":
+            # FFT-based pooling (Low-pass filter in sequence dim)
+            # z: (B, N, D)
+            # FFT over N -> (B, N, D)
+            # Take DC component (index 0) = Mean
+            # Take low freq components?
+            # If we simply take index 0, it's Mean Pooling.
+            # Let's take the *magnitude* of the first K frequencies and average them?
+            # Or: Return the component with highest total energy (Dominant Frequency Pooling).
+
+            # Implementation: Top-1 Frequency (excluding DC) + DC
+            z_fft = torch.fft.fft(z, dim=1)  # (B, N, D)
+
+            # DC component (Mean)
+            dc = z_fft[:, 0, :] / z.size(1)
+
+            # Find dominant non-DC freq
+            if z.size(1) > 1:
+                amplitudes = torch.abs(z_fft[:, 1:, :]).sum(dim=-1)  # (B, N-1)
+                best_idx = amplitudes.argmax(dim=1) + 1  # (B,)
+
+                # Gather (B, 1, D)
+                batch_idx = torch.arange(z.size(0), device=z.device)
+                dominant = z_fft[batch_idx, best_idx, :] / z.size(1)
+                return dc + dominant
+            return dc
+
+        raise ValueError(f"Unknown pooling: {self.pooling_type}")
 
     def forward(self, z: torch.Tensor, mask: torch.Tensor | None = None) -> dict[str, Any]:
         # Pool
@@ -157,8 +218,7 @@ class StandardClassificationHead(nn.Module):
 
 
 class TokenClassificationHead(nn.Module):
-    """
-    Head for per-token classification.
+    """Head for per-token classification.
     No pooling, just projection of each token's magnitude.
     """
 
@@ -180,8 +240,7 @@ class TokenClassificationHead(nn.Module):
 
 
 class ComplexProjection(nn.Module):
-    """
-    Project complex inputs to different dimension [Complex -> Complex].
+    """Project complex inputs to different dimension [Complex -> Complex].
     Uses complex-valued linear layer.
     """
 
@@ -194,8 +253,7 @@ class ComplexProjection(nn.Module):
 
 
 class CVKANTokenClassifier(CVKAN):
-    """
-    CV-KAN model for token classification tasks (e.g., NER, signal detection).
+    """CV-KAN model for token classification tasks (e.g., NER, signal detection).
     Legacy wrapper around composed CVKAN with TokenClassificationHead.
     """
 
@@ -229,16 +287,15 @@ class CVKANTokenClassifier(CVKAN):
         # 2. Embedding
         if input_type == "real":
             embedding = ComplexEmbedding(d_input, d_complex)
+        elif d_input != d_complex:
+            embedding = ComplexProjection(d_input, d_complex)
         else:
-            if d_input != d_complex:
-                embedding = ComplexProjection(d_input, d_complex)
-            else:
 
-                class IdentityComplexEmbedding(nn.Module):
-                    def forward(self, x):
-                        return x
+            class IdentityComplexEmbedding(nn.Module):
+                def forward(self, x):
+                    return x
 
-                embedding = IdentityComplexEmbedding()
+            embedding = IdentityComplexEmbedding()
 
         # 3. Backbone
         backbone = CVKANBackbone(config)

@@ -13,8 +13,7 @@ def create_cifar10_dataloader(
     subset_size: int = None,
     download: bool = True,
 ):
-    """
-    Create CIFAR-10 dataloaders.
+    """Create CIFAR-10 dataloaders.
 
     Args:
         root: Data directory
@@ -27,32 +26,31 @@ def create_cifar10_dataloader(
     Returns:
         train_loader, val_loader, test_loader, num_classes
     """
-
-    transform_train = transforms.Compose(
-        [
-            transforms.Resize(image_size),
-            transforms.RandomCrop(image_size, padding=4),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-        ]
-    )
-
-    transform_test = transforms.Compose(
-        [
-            transforms.Resize(image_size),
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-        ]
-    )
-
     os.makedirs(root, exist_ok=True)
 
+    train_transform = transforms.Compose(
+        [
+            transforms.RandomCrop(image_size, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ]
+    )
+
+    test_transform = transforms.Compose(
+        [
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ]
+    )
+
     train_dataset = datasets.CIFAR10(
-        root=root, train=True, download=download, transform=transform_train
+        root=root, train=True, download=download, transform=train_transform
     )
     test_dataset = datasets.CIFAR10(
-        root=root, train=False, download=download, transform=transform_test
+        root=root, train=False, download=download, transform=test_transform
     )
 
     # Split train into train/val (90/10)
@@ -96,8 +94,7 @@ def create_cifar100_dataloader(
     subset_size: int = None,
     download: bool = True,
 ):
-    """
-    Create CIFAR-100 dataloaders (100 fine-grained classes).
+    """Create CIFAR-100 dataloaders (100 fine-grained classes).
 
     Args:
         root: Data directory
@@ -110,7 +107,6 @@ def create_cifar100_dataloader(
     Returns:
         train_loader, val_loader, test_loader, num_classes
     """
-
     transform_train = transforms.Compose(
         [
             transforms.Resize(image_size),
@@ -183,8 +179,7 @@ def create_fashionmnist_dataloader(
     subset_size: int = None,
     download: bool = True,
 ):
-    """
-    Create FashionMNIST dataloaders (10 grayscale clothing classes).
+    """Create FashionMNIST dataloaders (10 grayscale clothing classes).
 
     Args:
         root: Data directory
@@ -197,7 +192,6 @@ def create_fashionmnist_dataloader(
     Returns:
         train_loader, val_loader, test_loader, num_classes
     """
-
     # Convert grayscale to 3 channels for consistency with other image datasets
     transform_train = transforms.Compose(
         [

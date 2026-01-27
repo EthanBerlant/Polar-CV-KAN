@@ -13,6 +13,7 @@ class ModelConfig:
     center_magnitudes: bool = True
     dropout: float = 0.0
     input_type: Literal["real", "complex"] = "complex"
+    normalization: Literal["none", "layer", "batch", "rms"] = "none"
 
 
 @dataclass
@@ -20,11 +21,23 @@ class CVKANConfig(ModelConfig):
     """Configuration for standard CVKAN models."""
 
     head_approach: Literal["emergent", "offset", "factored"] = "emergent"
-    block_type: Literal["polarizing", "attention"] = "polarizing"
-    aggregation_type: Literal["mean", "causal", "window", "neighborhood"] = "mean"
+    block_type: Literal["polarizing", "attention", "hierarchical"] = "polarizing"
+    aggregation_type: Literal["mean", "causal", "window", "neighborhood", "magnitude_weighted"] = (
+        "mean"
+    )
     n_heads: int = 8
     n_classes: int = 2
     skip_connections: bool = False
+
+    # Hierarchical Config
+    hierarchical_levels: int | None = None
+    hierarchical_sharing: str = "per_level"  # shared, per_level, per_direction
+    hierarchical_top_down: str = "none"  # none, mirror, learned
+    hierarchical_split_idx: int = 2  # For hybrid sharing
+    hierarchical_phase_shifting: bool = False  # For phase alignment
+    hierarchical_interaction: str = "broadcast"  # broadcast or pointwise
+    aggregation_type: str = "magnitude_weighted"  # aggregation method
+    mag_init_scale: float = 0.1
 
 
 @dataclass

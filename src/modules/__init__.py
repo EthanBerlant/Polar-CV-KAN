@@ -19,6 +19,7 @@ from .multi_head import (
     FactoredHeadsPolarizing,
     PhaseOffsetPolarizing,
 )
+from .multi_path_hierarchical import MultiPathHierarchicalPolarization
 from .phase_attention import PhaseAttentionBlock
 from .polarizing_block import PolarizingBlock
 from .positional_encoding import (
@@ -38,6 +39,7 @@ __all__ = [
     "EmergentHeadsPolarizing",
     "PhaseOffsetPolarizing",
     "FactoredHeadsPolarizing",
+    "MultiPathHierarchicalPolarization",
     # Aggregation strategies
     "GlobalMeanAggregation",
     "MagnitudeWeightedAggregation",

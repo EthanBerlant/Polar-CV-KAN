@@ -1,5 +1,4 @@
-"""
-CV-KAN Image Classifier.
+"""CV-KAN Image Classifier.
 
 A CV-KAN variant optimized for image classification using:
 - Patch-based embedding (ViT-style)
@@ -13,7 +12,7 @@ Inherits from BaseCVKAN for log-magnitude centering and pooling.
 from typing import Literal
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from ..configs.model import CVKANConfig
 from ..modules.pooling import AttentionPool2d
@@ -26,8 +25,7 @@ from .cv_kan import CVKAN, CVKANBackbone
 
 
 class LinearPatchEmbedding(nn.Module):
-    """
-    Convert image to patch embeddings in complex space.
+    """Convert image to patch embeddings in complex space.
 
     Similar to ViT patch embedding, but projects to complex numbers
     for CV-KAN processing.
@@ -73,8 +71,7 @@ class LinearPatchEmbedding(nn.Module):
         nn.init.zeros_(self.proj_imag.bias)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, tuple[int, int]]:
-        """
-        Convert image to complex patch embeddings.
+        """Convert image to complex patch embeddings.
 
         Args:
             x: Image tensor of shape (batch, channels, height, width)
@@ -134,8 +131,7 @@ class LinearPatchEmbedding(nn.Module):
 
 
 class ConvPatchEmbedding(nn.Module):
-    """
-    Deep convolutional patch embedding for better feature extraction.
+    """Deep convolutional patch embedding for better feature extraction.
 
     Uses a 2-layer convolutional stem instead of a single linear projection:
     1. Conv2d(3 -> d/2, 3x3, stride 2) -> BN -> ReLU
@@ -198,9 +194,9 @@ class ConvPatchEmbedding(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, tuple[int, int]]:
-        """
-        Args:
+        """Args:
             x: (B, C, H, W)
+
         Returns:
             z: (B, N, d_complex)
         """
@@ -218,20 +214,20 @@ class ConvPatchEmbedding(nn.Module):
 
 
 class ImageEmbedding(nn.Module):
-    """
-    Composite embedding for images: Patch Embedding + Positional Encoding.
+    """Composite embedding for images: Patch Embedding + Positional Encoding.
     Satisfies Embedding protocol.
     """
 
     def __init__(
         self,
-        img_size,
-        patch_size,
-        in_channels,
-        d_complex,
-        embedding_type="linear",
-        pos_encoding="sinusoidal",
+        img_size: int | tuple[int, int],
+        patch_size: int | tuple[int, int],
+        in_channels: int,
+        d_complex: int,
+        embedding_type: str = "linear",
+        pos_encoding: str = "sinusoidal",
     ):
+        """Initialize ImageEmbedding."""
         super().__init__()
 
         # Patch embedding
@@ -281,12 +277,19 @@ class ImageEmbedding(nn.Module):
 
 
 class ImageClassificationHead(nn.Module):
-    """
-    Classification head for images.
+    """Classification head for images.
     Supports special MLP-based AttentionPool2d.
     """
 
-    def __init__(self, d_complex, n_classes, kan_hidden, pooling, dropout):
+    def __init__(
+        self,
+        d_complex: int,
+        n_classes: int,
+        kan_hidden: int,
+        pooling: str,
+        dropout: float,
+    ):
+        """Initialize ImageClassificationHead."""
         super().__init__()
         self.pooling_type = pooling
         self.d_complex = d_complex
@@ -315,17 +318,16 @@ class ImageClassificationHead(nn.Module):
             pooled_imag = self.attention_pool(imag)
             return torch.complex(pooled_real, pooled_imag)
 
-        elif self.pooling_type == "mean":
+        if self.pooling_type == "mean":
             return z.mean(dim=1)
-        elif self.pooling_type == "max":
+        if self.pooling_type == "max":
             # Simple max magnitude
             mag = torch.abs(z)
             _, indices = mag.max(dim=1)
             batch_indices = torch.arange(z.size(0), device=z.device).unsqueeze(-1)
             dim_indices = torch.arange(z.size(2), device=z.device).unsqueeze(0)
             return z[batch_indices, indices, dim_indices]
-        else:
-            raise ValueError(f"Unknown pooling: {self.pooling_type}")
+        raise ValueError(f"Unknown pooling: {self.pooling_type}")
 
     def forward(self, z: torch.Tensor, mask: torch.Tensor = None) -> dict:
         pooled = self._pool(z)
@@ -336,9 +338,7 @@ class ImageClassificationHead(nn.Module):
 
 
 class CVKANImageClassifier(CVKAN):
-    """
-    CV-KAN model for image classification (Composition-based).
-    """
+    """CV-KAN model for image classification (Composition-based)."""
 
     def __init__(
         self,
@@ -351,9 +351,10 @@ class CVKANImageClassifier(CVKAN):
         kan_hidden: int = 32,
         pos_encoding: Literal["sinusoidal", "learnable"] | None = "sinusoidal",
         pooling: Literal["mean", "max", "attention"] = "mean",
-        embedding_type: Literal["linear", "conv"] = "linear",
+        embedding_type: Literal["linear", "conv"] = "conv",
         center_magnitudes: bool = True,
         dropout: float = 0.0,
+        normalization: Literal["none", "layer", "batch", "rms"] = "none",
         **kwargs,  # Ignore extra args
     ):
         # 1. Config (for Backbone)
@@ -364,6 +365,8 @@ class CVKANImageClassifier(CVKAN):
             center_magnitudes=center_magnitudes,
             dropout=dropout,
             input_type="real",  # Images are real
+            normalization=normalization,
+            **kwargs,
         )
 
         # 2. Components

@@ -1,5 +1,4 @@
-"""
-Experiment tracking with MLflow.
+"""Experiment tracking with MLflow.
 
 This module provides a unified interface for tracking experiments,
 logging metrics, parameters, and artifacts. It wraps MLflow with
@@ -24,12 +23,11 @@ from typing import Any
 
 import mlflow
 import torch
-import torch.nn as nn
+from torch import nn
 
 
 class ExperimentTracker:
-    """
-    Unified experiment tracking with MLflow backend.
+    """Unified experiment tracking with MLflow backend.
 
     Features:
     - Automatic experiment creation if doesn't exist
@@ -52,8 +50,7 @@ class ExperimentTracker:
         tracking_uri: str | None = None,
         tags: dict | None = None,
     ):
-        """
-        Initialize experiment tracker.
+        """Initialize experiment tracker.
 
         Args:
             experiment_name: Name of the MLflow experiment (creates if needed)
@@ -98,8 +95,7 @@ class ExperimentTracker:
         return self._run_id
 
     def log_params(self, params: dict[str, Any]) -> None:
-        """
-        Log hyperparameters.
+        """Log hyperparameters.
 
         Args:
             params: Dict of parameter names to values
@@ -118,8 +114,7 @@ class ExperimentTracker:
         metrics: dict[str, float],
         step: int | None = None,
     ) -> None:
-        """
-        Log metrics for the current step.
+        """Log metrics for the current step.
 
         Args:
             metrics: Dict of metric names to values
@@ -142,8 +137,7 @@ class ExperimentTracker:
         name: str = "model",
         save_dir: str | Path | None = None,
     ) -> Path:
-        """
-        Save model state dict and log as artifact.
+        """Save model state dict and log as artifact.
 
         Args:
             model: PyTorch model
@@ -178,8 +172,7 @@ class ExperimentTracker:
 
 
 def get_or_create_experiment(name: str) -> str:
-    """
-    Get experiment ID, creating if it doesn't exist.
+    """Get experiment ID, creating if it doesn't exist.
 
     Args:
         name: Experiment name
@@ -194,8 +187,7 @@ def get_or_create_experiment(name: str) -> str:
 
 
 def list_runs(experiment_name: str, max_results: int = 100) -> list[dict]:
-    """
-    List runs for an experiment.
+    """List runs for an experiment.
 
     Args:
         experiment_name: Name of experiment

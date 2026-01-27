@@ -19,6 +19,21 @@ from .aggregation import GlobalMeanAggregation, MagnitudeWeightedAggregation
 from .polarizing_block import PolarizingBlock
 
 
+class ComplexDropout(nn.Module):
+    """Dropout for complex tensors (drops entire complex number)."""
+
+    def __init__(self, p: float = 0.5):
+        super().__init__()
+        self.p = p
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.training or self.p == 0.0:
+            return x
+        # Generate mask on real part (same mask for real and imag)
+        mask = torch.ones_like(x.real).bernoulli_(1 - self.p)
+        return x * mask / (1 - self.p)
+
+
 class HierarchicalPolarization(nn.Module):
     """Recursive multi-scale polarization inspired by polar error correction.
 
@@ -33,14 +48,15 @@ class HierarchicalPolarization(nn.Module):
             - 'per_level': One transform per level (default)
             - 'per_direction': Separate up/down transforms
         aggregation: Aggregation strategy within groups:
-            - 'mean': Simple mean (default)
-            - 'magnitude_weighted': Use magnitude as weights
+            - 'mean': Simple mean
+            - 'magnitude_weighted': Use magnitude as weights (default)
         top_down: Whether to include top-down pass:
             - 'none': Bottom-up only (default)
             - 'mirror': Reuse bottom-up transforms in reverse
             - 'learned': Separate learned transforms for top-down
         kan_hidden: Hidden dimension for polarizing blocks
         dropout: Dropout rate
+        interaction: "broadcast" or "pointwise"
     """
 
     def __init__(
@@ -48,10 +64,14 @@ class HierarchicalPolarization(nn.Module):
         d_complex: int,
         max_levels: int | None = None,
         weight_sharing: str = "per_level",
-        aggregation: str = "mean",
+        aggregation: str = "magnitude_weighted",
         top_down: str = "none",
         kan_hidden: int = 32,
         dropout: float = 0.0,
+        atomic: bool = False,
+        hybrid_split_idx: int = 2,
+        phase_shifting: bool = False,
+        interaction: str = "broadcast",
     ):
         super().__init__()
         self.d_complex = d_complex
@@ -61,6 +81,14 @@ class HierarchicalPolarization(nn.Module):
         self.top_down_mode = top_down
         self.kan_hidden = kan_hidden
         self.dropout_rate = dropout
+        self.atomic = atomic
+        self.hybrid_split_idx = hybrid_split_idx
+        self.phase_shifting = phase_shifting
+        self.interaction = interaction
+
+        # If atomic, internal blocks have 0 dropout. We apply it at the end.
+        internal_dropout = 0.0 if atomic else dropout
+        self.final_dropout = ComplexDropout(dropout) if (atomic and dropout > 0) else nn.Identity()
 
         # Create aggregation module
         if aggregation == "mean":
@@ -74,16 +102,52 @@ class HierarchicalPolarization(nn.Module):
         # We'll create up to 10 levels (supports seq_len up to 1024)
         n_transforms = 10 if max_levels is None else max_levels
 
+        # Learnable phase shifts (per level)
+        if phase_shifting:
+            # For each level, we have a group size of 2^(level+1).
+            # We need a bias for each position within appropriate groups.
+            # Max seq len is 1024 => level 9 has group size 1024.
+            # We can just store a list of parameters, one tensor per level.
+            self.phase_shifts = nn.ParameterList()
+            for i in range(n_transforms):
+                group_size = 2 ** (i + 1)
+                # Initialize with 0 (no shift)
+                self.phase_shifts.append(nn.Parameter(torch.zeros(group_size)))
+        else:
+            self.phase_shifts = None
+
         if weight_sharing == "shared":
             self.up_transforms = nn.ModuleList(
-                [PolarizingBlock(d_complex, kan_hidden=kan_hidden, dropout=dropout)]
+                [PolarizingBlock(d_complex, kan_hidden=kan_hidden, dropout=internal_dropout)]
             )
         elif weight_sharing in ["per_level", "per_direction"]:
             self.up_transforms = nn.ModuleList(
                 [
-                    PolarizingBlock(d_complex, kan_hidden=kan_hidden, dropout=dropout)
+                    PolarizingBlock(
+                        d_complex,
+                        kan_hidden=kan_hidden,
+                        dropout=internal_dropout,
+                        interaction=interaction,
+                    )
                     for _ in range(n_transforms)
                 ]
+            )
+        elif weight_sharing == "hybrid":
+            # first K levels are independent
+            self.up_transforms = nn.ModuleList(
+                [
+                    PolarizingBlock(
+                        d_complex,
+                        kan_hidden=kan_hidden,
+                        dropout=internal_dropout,
+                        interaction=interaction,
+                    )
+                    for _ in range(hybrid_split_idx)
+                ]
+            )
+            # rest are shared (stored as a single module)
+            self.shared_transform = PolarizingBlock(
+                d_complex, kan_hidden=kan_hidden, dropout=internal_dropout
             )
         else:
             raise ValueError(f"Unknown weight_sharing: {weight_sharing}")
@@ -92,7 +156,12 @@ class HierarchicalPolarization(nn.Module):
         if top_down == "learned":
             self.down_transforms = nn.ModuleList(
                 [
-                    PolarizingBlock(d_complex, kan_hidden=kan_hidden, dropout=dropout)
+                    PolarizingBlock(
+                        d_complex,
+                        kan_hidden=kan_hidden,
+                        dropout=internal_dropout,
+                        interaction=interaction,
+                    )
                     for _ in range(n_transforms)
                 ]
             )
@@ -104,6 +173,10 @@ class HierarchicalPolarization(nn.Module):
         if direction == "up":
             if self.weight_sharing == "shared":
                 return self.up_transforms[0]
+            if self.weight_sharing == "hybrid":
+                if level < self.hybrid_split_idx:
+                    return self.up_transforms[level]
+                return self.shared_transform
             return self.up_transforms[min(level, len(self.up_transforms) - 1)]
         if self.top_down_mode == "mirror":
             if self.weight_sharing == "shared":
@@ -129,7 +202,7 @@ class HierarchicalPolarization(nn.Module):
         return Z_padded, seq_len
 
     def _aggregate_groups(
-        self, Z: torch.Tensor, group_size: int
+        self, Z: torch.Tensor, group_size: int, level: int = -1
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Aggregate within non-overlapping groups.
 
@@ -145,11 +218,29 @@ class HierarchicalPolarization(nn.Module):
         n_groups = seq_len // group_size
 
         # Reshape into groups
-        Z_grouped = Z.view(batch, n_groups, group_size, d)
+        try:
+            Z_grouped = Z.view(batch, n_groups, group_size, d)
+        except RuntimeError:
+            Z_grouped = Z.reshape(batch, n_groups, group_size, d)
+
+        # Apply phase shift if enabled
+        if self.phase_shifting and level >= 0 and level < len(self.phase_shifts):
+            # phase_shifts[level]: (group_size,)
+            # Broadcast to (1, 1, group_size, 1) to match Z_grouped
+            shift = self.phase_shifts[level].view(1, 1, group_size, 1)
+            # Create complex rotation: e^(i*shift)
+            # cos(shift) + i*sin(shift)
+            rot = torch.complex(torch.cos(shift), torch.sin(shift))
+            Z_shifted = Z_grouped * rot
+
+            # Use shifted Z for aggregation
+            Z_for_agg = Z_shifted
+        else:
+            Z_for_agg = Z_grouped
 
         # Aggregate within each group
         # Reshape for aggregator: (batch * n_groups, group_size, d)
-        Z_flat = Z_grouped.view(batch * n_groups, group_size, d)
+        Z_flat = Z_for_agg.reshape(batch * n_groups, group_size, d)
 
         if self.aggregation_type == "mean":
             A_flat = Z_flat.mean(dim=1)  # (batch * n_groups, d)
@@ -159,6 +250,11 @@ class HierarchicalPolarization(nn.Module):
             A_flat = (Z_flat * weights).sum(dim=1)
 
         aggregates = A_flat.view(batch, n_groups, d)
+        # Return ORIGINAL Z_grouped (unshifted) for residual consistency,
+        # or shifted? If we shift, we change the basis for the next level.
+        # Let's return unshifted Z_grouped for the residual add to avoid drift.
+        # But aggregate A is computed from shifted.
+        # A_broadcast will be added to Z_grouped.
         return aggregates, Z_grouped
 
     def forward(self, Z: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
@@ -191,7 +287,7 @@ class HierarchicalPolarization(nn.Module):
                 break
 
             # Aggregate within groups
-            aggregates, Z_grouped = self._aggregate_groups(Z, group_size)
+            aggregates, Z_grouped = self._aggregate_groups(Z, group_size, level)
 
             # Transform aggregates
             # aggregates: (batch, n_groups, d) -> need (batch, n_groups, d) for PolarizingBlock
@@ -219,7 +315,7 @@ class HierarchicalPolarization(nn.Module):
                     continue
 
                 # Aggregate within groups (again, with updated Z)
-                aggregates, Z_grouped = self._aggregate_groups(Z, group_size)
+                aggregates, Z_grouped = self._aggregate_groups(Z, group_size, level)
 
                 # Transform with down transform
                 transform = self._get_transform(level, "down")
@@ -232,7 +328,8 @@ class HierarchicalPolarization(nn.Module):
                 Z = Z_grouped.view(batch, seq_len, d)
 
         # Unpad to original length
-        return Z[:, :orig_seq_len, :]
+        # Unpad to original length
+        return self.final_dropout(Z[:, :orig_seq_len, :])
 
     def get_config(self) -> dict:
         """Return configuration for serialization."""

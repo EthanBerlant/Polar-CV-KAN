@@ -152,4 +152,9 @@ visualizations/*.pdf
 
 # MLflow
 mlruns/
-mlflow.db
+experiments/mlflow.db
+
+# Runtime Status
+pilot_status.json
+research_status.json
+summary_results.csv

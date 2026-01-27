@@ -57,6 +57,7 @@ class BaseTrainer:
         output_dir: Path,
         args: Any,
         use_amp: bool = False,
+        debug_hook: Any = None,
     ):
         self.model = model
         self.optimizer = optimizer
@@ -65,6 +66,7 @@ class BaseTrainer:
         self.output_dir = output_dir
         self.args = args
         self.use_amp = use_amp
+        self.debug_hook = debug_hook
 
         # AMP Scaler
         self.scaler = (
@@ -130,6 +132,22 @@ class BaseTrainer:
                 total_metrics[k] = total_metrics.get(k, 0) + val_item
 
             n_batches += 1
+
+            # Debug Hook Step
+            if self.debug_hook:
+                self.debug_hook.step_counters()
+                if self.debug_hook.step % self.debug_hook.log_frequency == 0:
+                    stats = self.debug_hook.get_latest_stats()
+                    # Append to debug log file
+                    debug_file = self.output_dir / "debug_metrics.csv"
+                    import csv
+
+                    file_exists = debug_file.exists()
+                    with open(debug_file, "a", newline="") as f:
+                        writer = csv.writer(f)
+                        if not file_exists:
+                            writer.writerow(["step", "epoch"] + list(stats.keys()))
+                        writer.writerow([self.debug_hook.step, epoch] + list(stats.values()))
 
             # Update pbar
             # display_metrics = {k: f"{v:.4f}" for k,v in metrics.items()}

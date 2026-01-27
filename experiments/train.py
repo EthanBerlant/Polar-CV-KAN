@@ -48,9 +48,21 @@ def main():
     parser.add_argument("--patience", type=int, help="Early stopping patience")
     parser.add_argument("--seed", type=int, help="Random seed")
 
+    # Research args
+    parser.add_argument("--aggregation", type=str, help="Aggregation type")
+    parser.add_argument("--block_type", type=str, help="Block type (polarizing, hierarchical)")
+    parser.add_argument("--hierarchical_levels", type=int, help="Max levels for hierarchical")
+    parser.add_argument("--hierarchical_sharing", type=str, help="Weight sharing for hierarchical")
+    parser.add_argument("--hierarchical_top_down", type=str, help="Top down mode for hierarchical")
+
+    # Debug args
+    parser.add_argument("--debug", action="store_true", help="Enable deep diagnostic hooks")
+    parser.add_argument("--batch_norm", action="store_true", help="Enable Complex Batch Norm")
+
     args = parser.parse_args()
 
-    # 1. Load Configuration
+    # ... (Config loading logic omitted for brevity, keeps existing) ...
+    # 1. Load Configuration (keep existing)
     if args.preset:
         model_config = get_preset(args.preset)
         print(f"Loaded preset: {args.preset}")
@@ -58,7 +70,7 @@ def main():
         # Default fallback or error
         raise ValueError("Please provide --preset (config file loading not fully impl yet)")
 
-    # Apply overrides
+    # Apply overrides (keep existing)
     if args.d_complex:
         model_config.d_complex = args.d_complex
     if args.n_layers:
@@ -74,12 +86,79 @@ def main():
     if args.skip_connections:
         model_config.skip_connections = True
 
+    # Apply research overrides
+    if args.aggregation:
+        model_config.aggregation_type = args.aggregation
+    if args.block_type:
+        model_config.block_type = args.block_type
+    if args.hierarchical_levels:
+        model_config.hierarchical_levels = args.hierarchical_levels
+    if args.hierarchical_sharing:
+        model_config.hierarchical_sharing = args.hierarchical_sharing
+    if args.hierarchical_sharing:
+        model_config.hierarchical_sharing = args.hierarchical_sharing
+    if args.hierarchical_top_down:
+        model_config.hierarchical_top_down = args.hierarchical_top_down
+
+    if args.batch_norm:
+        if hasattr(model_config, "normalization"):
+            model_config.normalization = "batch"
+        else:
+            print("WARNING: Model config does not support normalization field.")
+
     # Create unique run dir
     # If run_name provided use it, else generic
     run_name = args.run_name or args.preset or "custom_run"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = Path(args.output_dir) / args.domain / f"{run_name}_{timestamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Training config
+    train_config = TrainingConfig(
+        output_dir=str(run_dir),
+        epochs=args.epochs if args.epochs else 50,
+        batch_size=args.batch_size if args.batch_size else 32,
+        subset_size=args.subset_size,
+        patience=args.patience if args.patience else 10,
+        seed=args.seed if args.seed else 42,
+    )
+
+    # Apply domain-specific defaults
+    if args.domain == "timeseries":
+        train_config.metric_name = "mse"
+        train_config.metric_mode = "min"
+    elif args.domain in ["nlp", "image", "audio"]:
+        train_config.metric_name = "accuracy"
+        train_config.metric_mode = "max"
+
+    # 2. Load Domain Module
+    domain = load_domain_module(args.domain)
+
+    # 3. Create DataLoaders
+    print("Creating dataloaders...")
+    train_loader, val_loader, test_loader, meta = domain.create_dataloaders(
+        model_config, train_config
+    )
+
+    # Update config from metadata
+    if "n_classes" in meta:
+        model_config.n_classes = meta["n_classes"]
+    if "vocab_size" in meta and hasattr(model_config, "vocab_size"):
+        model_config.vocab_size = meta["vocab_size"]
+
+    # 4. Create Model
+    cleanup_gpu()
+    print(f"Creating model for {args.domain}...")
+
+    # Check for precomputed mode (audio domain)
+    use_precomputed = meta.get("use_precomputed", False)
+    if (
+        hasattr(domain.create_model, "__code__")
+        and "use_precomputed" in domain.create_model.__code__.co_varnames
+    ):
+        model = domain.create_model(model_config, use_precomputed=use_precomputed)
+    else:
+        model = domain.create_model(model_config)
 
     # Save Combined Config
     # We construct combined_args later, but good to save initial intent here or later.
@@ -105,6 +184,8 @@ def main():
     # 2. Load Domain Module
     domain = load_domain_module(args.domain)
 
+    # 3. Create DataLoaders
+    # Adapters should accept config and return loaders + updated config (e.g. n_classes)
     # 3. Create DataLoaders
     # Adapters should accept config and return loaders + updated config (e.g. n_classes)
     # But updated config might mismatch dataclass if we add fields?
@@ -135,6 +216,15 @@ def main():
         model = domain.create_model(model_config, use_precomputed=use_precomputed)
     else:
         model = domain.create_model(model_config)
+
+    # Debug Hook Attachment
+    debug_hook = None
+    if args.debug:
+        print("🔧 Attaching Deep Diagnostic Hooks...")
+        from src.tracking.hooks import DebugHook
+
+        debug_hook = DebugHook(log_frequency=10)
+        debug_hook.register(model)
 
     # 5. Setup Trainer
     # Domain module can provide a specific Trainer class or we use generic
@@ -178,7 +268,8 @@ def main():
         "device": device,
         "output_dir": Path(train_config.output_dir),
         "args": combined_args,
-        "use_amp": train_config.amp,
+        "use_amp": train_config.amp if hasattr(train_config, "amp") else False,
+        "debug_hook": debug_hook,
     }
     if use_precomputed:
         trainer_kwargs["use_precomputed"] = True
