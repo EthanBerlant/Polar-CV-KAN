@@ -1,8 +1,13 @@
 import torch
 from torch import nn
 
+from src.registry import NORMALIZATION_REGISTRY
 
+
+@NORMALIZATION_REGISTRY.register("batch")
 class ComplexBatchNorm2d(nn.Module):
+    """Wrapper for complex-aware normalization to handle dimension ordering."""
+
     def __init__(
         self,
         num_features: int,
@@ -10,7 +15,7 @@ class ComplexBatchNorm2d(nn.Module):
         momentum: float = 0.1,
         affine: bool = True,
         track_running_stats: bool = True,
-    ):
+    ) -> None:
         """Initialize ComplexBatchNorm2d."""
         super().__init__()
         self.num_features = num_features
@@ -51,7 +56,8 @@ class ComplexBatchNorm2d(nn.Module):
 
         self.reset_parameters()
 
-    def reset_parameters(self):
+    def reset_parameters(self) -> None:
+        """Reset parameters."""
         if self.affine:
             nn.init.constant_(self.gamma_rr, 1)
             nn.init.constant_(self.gamma_ri, 0)
@@ -62,6 +68,7 @@ class ComplexBatchNorm2d(nn.Module):
             nn.init.constant_(self.beta_i, 0)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        """Forward pass."""
         # input: (N, C, H, W) complex
         real = input.real
         imag = input.imag
@@ -71,9 +78,9 @@ class ComplexBatchNorm2d(nn.Module):
         if self.training and self.track_running_stats and self.num_batches_tracked is not None:
             self.num_batches_tracked = self.num_batches_tracked + 1
             if self.momentum is None:  # use cumulative moving average
-                    exponential_average_factor = 1.0 / float(self.num_batches_tracked)
-                else:  # use exponential moving average
-                    exponential_average_factor = self.momentum
+                exponential_average_factor = 1.0 / float(self.num_batches_tracked)
+            else:  # use exponential moving average
+                exponential_average_factor = self.momentum
 
         if self.training:
             # Stats along (N, H, W) -> (C)
@@ -170,11 +177,11 @@ class ComplexBatchNorm2d(nn.Module):
         # scale = 1 / sqrt(det) ? No.
 
         # Let's use the explicit solution
-        tau = var_rr + var_ii
-        delta = (var_rr * var_ii) - (var_ri**2)  # Determinant
+        # tau = var_rr + var_ii
+        # delta = (var_rr * var_ii) - (var_ri**2)  # Determinant
         # s = sqrt(delta)
-        s = torch.sqrt(delta + self.eps)
-        t = torch.sqrt(tau + 2 * s)
+        # s = torch.sqrt(delta + self.eps)
+        # t = torch.sqrt(tau + 2 * s)
 
         # M^{-1/2} = (M + sI)^{-1} * (1/t) ? No that's not right.
         # M^{-1/2} = 1/t * (M + sI) ? No.
@@ -226,13 +233,14 @@ class ComplexBatchNorm2d(nn.Module):
         return torch.complex(yr, yi)
 
 
+@NORMALIZATION_REGISTRY.register("layer")
 class ComplexLayerNorm(nn.Module):
     """Complex-aware Layer Normalization.
 
     Normalizes across the complex dimension (D).
     """
 
-    def __init__(self, num_features: int, eps: float = 1e-5):
+    def __init__(self, num_features: int, eps: float = 1e-5) -> None:
         """Initialize ComplexLayerNorm."""
         super().__init__()
         self.num_features = num_features
@@ -241,6 +249,7 @@ class ComplexLayerNorm(nn.Module):
         self.beta = nn.Parameter(torch.zeros(num_features, dtype=torch.complex64))
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
+        """Forward pass."""
         # z: (B, N, D) or (B, D, H, W)
         # We assume normalization across the LAST dimension (D or Channels)
 

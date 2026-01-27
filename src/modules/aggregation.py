@@ -16,7 +16,10 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from src.registry import AGGREGATION_REGISTRY
 
+
+@AGGREGATION_REGISTRY.register("mean")
 class GlobalMeanAggregation(nn.Module):
     """Standard global mean aggregation.
 
@@ -44,6 +47,7 @@ class GlobalMeanAggregation(nn.Module):
         return Z.mean(dim=1, keepdim=True)
 
 
+@AGGREGATION_REGISTRY.register("magnitude_weighted")
 class MagnitudeWeightedAggregation(nn.Module):
     """Magnitude-weighted mean aggregation (parameter-free).
 
@@ -80,6 +84,7 @@ class MagnitudeWeightedAggregation(nn.Module):
         return (Z * weights).sum(dim=1, keepdim=True)
 
 
+@AGGREGATION_REGISTRY.register("local_window")
 class LocalWindowAggregation(nn.Module):
     """Local 2D window aggregation for images.
 
@@ -92,6 +97,7 @@ class LocalWindowAggregation(nn.Module):
     """
 
     def __init__(self, kernel_size: int = 7, stride: int = 1) -> None:
+        """Initialize."""
         super().__init__()
         self.kernel_size = kernel_size
         self.stride = stride
@@ -121,7 +127,7 @@ class LocalWindowAggregation(nn.Module):
             if spatial_shape is None:
                 # Assume square
                 H = W = int(n_tokens**0.5)
-                assert n_tokens == H * W, f"Cannot infer spatial dims from {n_tokens} tokens"
+                # assert n_tokens == H * W, f"Cannot infer spatial dims from {n_tokens} tokens"
             else:
                 H, W = spatial_shape
             Z = Z.view(batch, H, W, d_complex)
@@ -156,6 +162,7 @@ class LocalWindowAggregation(nn.Module):
         return A
 
 
+@AGGREGATION_REGISTRY.register("causal")
 class CausalAggregation(nn.Module):
     """Causal cumulative mean aggregation for time series.
 
@@ -200,6 +207,7 @@ class CausalAggregation(nn.Module):
         return cumsum / counts
 
 
+@AGGREGATION_REGISTRY.register("graph_neighborhood")
 class NeighborhoodAggregation(nn.Module):
     """Graph neighborhood aggregation.
 
@@ -214,6 +222,7 @@ class NeighborhoodAggregation(nn.Module):
     """
 
     def __init__(self, normalize: bool = True, self_loop: bool = True) -> None:
+        """Initialize."""
         super().__init__()
         self.normalize = normalize
         self.self_loop = self_loop

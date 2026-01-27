@@ -10,40 +10,20 @@ description: How to run a tracked experiment with MLflow
 
 ## Quick Start
 
-Run experiments using the unified `train.py` with `--domain` and `--preset` flags:
+Run experiments using the universal `train.py` with standard flags:
 
 ```powershell
-# Image classification (CIFAR-10)
+# Image classification (CIFAR-10) using Batch Norm and Mean Aggregation
 // turbo
-python experiments/train.py --domain image --preset cifar10 --epochs 100
+python src/train.py --dataset cifar10 --epochs 100 --normalization batch --aggregation mean
 
-# NLP / Sentiment analysis (SST-2)
+# NLP / Sentiment analysis (SST-2) with Layer Norm and Magnitude Weighted
 // turbo
-python experiments/train.py --domain nlp --preset sst2 --d_complex 64 --n_layers 2
+python src/train.py --dataset sst2 --d_complex 64 --normalization layer --aggregation magnitude_weighted
 
 # Audio classification (Speech Commands)
 // turbo
-python experiments/train.py --domain audio --preset speech_commands --d_complex 128
-
-# Time series forecasting (ETTh1)
-// turbo
-python experiments/train.py --domain timeseries --preset etth1
-```
-
-## Run Benchmarks
-
-```powershell
-# Quick pilot test across all domains
-// turbo
-python experiments/run_benchmark.py --pilot
-
-# Full overnight benchmark
-// turbo
-python experiments/run_benchmark.py --full
-
-# Specific domains only
-// turbo
-python experiments/run_benchmark.py --pilot --domains image nlp
+python src/train.py --dataset speech_commands --d_complex 128 --normalization batch
 ```
 
 ## View Results in MLflow
@@ -59,16 +39,13 @@ Then open http://localhost:5000 in browser.
 
 | Parameter | Description | Typical Values |
 |-----------|-------------|----------------|
-| `--domain` | Task domain | image, audio, timeseries, nlp |
-| `--preset` | Model/data preset | cifar10, sst2, etth1, speech_commands |
+| `--dataset` | Task dataset | cifar10, sst2, speech_commands |
 | `--d_complex` | Complex dimension | 32, 64, 128, 256, 512 |
-| `--n_layers` | Number of polarizing layers | 2, 4, 6 |
-| `--pooling` | Pooling strategy | mean, max, attention |
+| `--normalization` | Normalization type | batch, layer, none |
+| `--aggregation` | Aggregation type | mean, max, polar, magnitude_weighted |
 | `--epochs` | Training epochs | 10, 30, 50, 100 |
-| `--subset_size` | Use subset for pilot runs | 100, 1000 |
 
 ## Output Locations
 
 - **MLflow runs**: `mlruns/` directory
-- **Model checkpoints**: `outputs/{domain}/{run_name}/`
-- **Config**: `outputs/{domain}/{run_name}/config.json`
+- **Model checkpoints**: `outputs/`
