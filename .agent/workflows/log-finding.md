@@ -42,7 +42,7 @@ All findings go in: `docs/research_log.md`
 
    **Category**: Training
    **Status**: Workaround
-   **Related**: `experiments/train.py`, MLflow run `abc123`
+   **Related**: `src/train.py`, MLflow run `abc123`
 
    ### Finding
    Automatic Mixed Precision (AMP) causes NaN gradients when used with
