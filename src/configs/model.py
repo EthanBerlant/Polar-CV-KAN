@@ -10,7 +10,7 @@ class ModelConfig:
     n_layers: int = 4
     kan_hidden: int = 32
     embedding_type: str = "linear"
-    aggregation: str = "polar"
+    aggregation: str = "magnitude_weighted"
     block_type: str = "polarizing"
     pooling: Literal["mean", "max", "attention"] = "mean"
     center_magnitudes: bool = True
@@ -25,7 +25,7 @@ class CVKANConfig(ModelConfig):
 
     head_approach: Literal["emergent", "offset", "factored"] = "emergent"
     aggregation_type: Literal["mean", "causal", "window", "neighborhood", "magnitude_weighted"] = (
-        "mean"
+        "magnitude_weighted"
     )
     n_heads: int = 8
     n_classes: int = 2
