@@ -1,3 +1,5 @@
+import importlib
+import importlib.util
 import os
 import sys
 from pathlib import Path
@@ -31,45 +33,61 @@ if sys.platform == "win32":
             except (AttributeError, OSError):
                 pass  # add_dll_directory not available or path invalid
 
-try:
-    import torchaudio
+_torchaudio_spec = importlib.util.find_spec("torchaudio")
+if _torchaudio_spec is None:
+    TORCHAUDIO_AVAILABLE = False
+    SPEECHCOMMANDS = None
+else:
+    torchaudio = importlib.import_module("torchaudio")
     from torchaudio.datasets import SPEECHCOMMANDS
 
     TORCHAUDIO_AVAILABLE = True
-except ImportError:
-    TORCHAUDIO_AVAILABLE = False
 
 
-class SubsetSC(SPEECHCOMMANDS):
-    def __init__(self, subset: str = None, root: str = "./data", download: bool = False):
-        super().__init__(root, download=download)
+if TORCHAUDIO_AVAILABLE:
 
-        def load_list(filename):
-            filepath = os.path.join(self._path, filename)
-            with open(filepath) as fileobj:
-                return [
-                    os.path.normpath(os.path.join(self._path, line.strip())) for line in fileobj
-                ]
+    class SubsetSC(SPEECHCOMMANDS):
+        def __init__(self, subset: str = None, root: str = "./data", download: bool = False):
+            super().__init__(root, download=download)
 
-        if subset == "validation":
-            self._walker = load_list("validation_list.txt")
-        elif subset == "testing":
-            self._walker = load_list("testing_list.txt")
-        elif subset == "training":
-            excludes = load_list("validation_list.txt") + load_list("testing_list.txt")
-            excludes = set(excludes)
-            self._walker = [w for w in self._walker if w not in excludes]
+            def load_list(filename):
+                filepath = os.path.join(self._path, filename)
+                with open(filepath) as fileobj:
+                    return [
+                        os.path.normpath(os.path.join(self._path, line.strip())) for line in fileobj
+                    ]
+
+            if subset == "validation":
+                self._walker = load_list("validation_list.txt")
+            elif subset == "testing":
+                self._walker = load_list("testing_list.txt")
+            elif subset == "training":
+                excludes = load_list("validation_list.txt") + load_list("testing_list.txt")
+                excludes = set(excludes)
+                self._walker = [w for w in self._walker if w not in excludes]
 
 
-class LogMelSpectrogram(nn.Module):
-    def __init__(self, sample_rate=16000, n_mels=64, n_fft=1024, hop_length=512):
-        super().__init__()
-        self.mel_spectrogram = torchaudio.transforms.MelSpectrogram(
-            sample_rate=sample_rate, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels
-        )
+    class LogMelSpectrogram(nn.Module):
+        def __init__(self, sample_rate=16000, n_mels=64, n_fft=1024, hop_length=512):
+            super().__init__()
+            self.mel_spectrogram = torchaudio.transforms.MelSpectrogram(
+                sample_rate=sample_rate, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels
+            )
 
-    def forward(self, x):
-        return torch.log(self.mel_spectrogram(x) + 1e-9)
+        def forward(self, x):
+            return torch.log(self.mel_spectrogram(x) + 1e-9)
+
+else:
+
+    class SubsetSC:
+        def __init__(self, *args, **kwargs):
+            raise ImportError("torchaudio is required to use SpeechCommands datasets.")
+
+
+    class LogMelSpectrogram(nn.Module):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+            raise ImportError("torchaudio is required to use LogMelSpectrogram.")
 
 
 def pad_sequence(batch):
