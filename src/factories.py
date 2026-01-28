@@ -146,12 +146,20 @@ class DataFactory:
             if loader_fn is None:
                 raise ValueError(f"Legacy loader '{loader_name}' missing for dataset '{ds_name}'.")
 
-            return loader_fn(
+            train_loader, val_loader, test_loader, meta = loader_fn(
                 root=config.data.data_dir,
                 batch_size=config.data.batch_size,
                 image_size=config.data.img_size,
                 num_workers=config.data.num_workers,
                 subset_size=config.data.subset_size,
             )
+            if not isinstance(meta, dict):
+                meta = {
+                    "n_classes": int(meta),
+                    "task_type": "image_classification",
+                    "img_size": config.data.img_size,
+                    "in_channels": 3,
+                }
+            return train_loader, val_loader, test_loader, meta
 
         raise ValueError(f"Unknown dataset '{ds_name}'. Register it in DATASET_REGISTRY.")
