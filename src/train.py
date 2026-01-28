@@ -55,13 +55,13 @@ def load_config(args: argparse.Namespace) -> ExperimentConfig:
     # 3. CLI Overrides (simplified mapping)
     if args.dataset:
         config.data.dataset_name = args.dataset
-    if args.batch_size:
+    if args.batch_size is not None:
         config.data.batch_size = args.batch_size
-    if args.epochs:
+    if args.epochs is not None:
         config.trainer.epochs = args.epochs
 
     # Model overrides
-    if args.d_complex:
+    if args.d_complex is not None:
         config.model.d_complex = args.d_complex
     if args.aggregation:
         config.model.aggregation = args.aggregation
