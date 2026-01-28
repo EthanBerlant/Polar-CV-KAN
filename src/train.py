@@ -1,6 +1,6 @@
 import argparse
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,19 @@ from src.trainer import BaseTrainer  # noqa: E402
 from src.utils import cleanup_gpu  # noqa: E402
 
 
+def _merge_dataclass(target: Any, updates: dict[str, Any], path: str = "") -> None:
+    """Merge a nested dict into a dataclass instance in-place."""
+    for key, value in updates.items():
+        if not hasattr(target, key):
+            raise ValueError(f"Unknown config key '{path}{key}'")
+
+        current_value = getattr(target, key)
+        if is_dataclass(current_value) and isinstance(value, dict):
+            _merge_dataclass(current_value, value, path=f"{path}{key}.")
+        else:
+            setattr(target, key, value)
+
+
 def load_config(args: argparse.Namespace) -> ExperimentConfig:
     """Load and merge configuration from defaults, YAML, and CLI args.
 
@@ -34,9 +47,10 @@ def load_config(args: argparse.Namespace) -> ExperimentConfig:
     # 2. Load YAML if provided
     if args.config:
         with Path(args.config).open() as f:
-            yaml.safe_load(f)
-            # Recursively update dataclasses (simplified)
-            # TODO: Robust dict->dataclass merge
+            yaml_config = yaml.safe_load(f) or {}
+        if not isinstance(yaml_config, dict):
+            raise ValueError("Config file must parse to a mapping at the top level.")
+        _merge_dataclass(config, yaml_config)
 
     # 3. CLI Overrides (simplified mapping)
     if args.dataset:
@@ -161,6 +175,8 @@ def main() -> None:
     print("Starting training...")
     with tracker:
         tracker.log_params(asdict(config.model))
+        tracker.log_params(asdict(config.data))
+        tracker.log_params(asdict(config.trainer))
 
         trainer.fit(
             train_loader,
@@ -169,6 +185,13 @@ def main() -> None:
             patience=config.trainer.patience,
             metric_name=config.trainer.metric_name,
         )
+
+        if test_loader is not None:
+            test_metrics = trainer.evaluate(test_loader)
+            if test_metrics:
+                tracker.log_metrics(
+                    {f"test_{key}": value for key, value in test_metrics.items()}
+                )
 
 
 if __name__ == "__main__":

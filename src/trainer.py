@@ -68,6 +68,8 @@ class BaseTrainer:
         self.use_amp = use_amp
         self.debug_hook = debug_hook
 
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
         # AMP Scaler
         self.scaler = (
             torch.amp.GradScaler("cuda") if use_amp and torch.cuda.is_available() else None
@@ -156,6 +158,8 @@ class BaseTrainer:
             pbar.set_postfix({"loss": f"{metrics['loss'].item():.4f}"})
 
         # Average metrics
+        if n_batches == 0:
+            return {}
         avg_metrics = {k: v / n_batches for k, v in total_metrics.items()}
         return avg_metrics
 
@@ -177,6 +181,8 @@ class BaseTrainer:
                 total_metrics[k] = total_metrics.get(k, 0) + val_item
             n_batches += 1
 
+        if n_batches == 0:
+            return {}
         avg_metrics = {k: v / n_batches for k, v in total_metrics.items()}
         return avg_metrics
 
@@ -229,6 +235,10 @@ class BaseTrainer:
             sys.stdout.flush()
 
             val_metrics = self.evaluate(val_loader)
+            if metric_name not in val_metrics:
+                raise ValueError(
+                    f"Metric '{metric_name}' not found in validation metrics: {list(val_metrics)}"
+                )
 
             if self.scheduler:
                 if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
