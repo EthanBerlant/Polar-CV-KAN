@@ -89,6 +89,8 @@ class ModelFactory:
                 kwargs["embedding_type"] = requested_patch_type
 
         if embedding_type == "token" and meta:
+            if "vocab_size" not in meta:
+                raise ValueError("Token embeddings require 'vocab_size' in dataset metadata.")
             kwargs.update({"vocab_size": meta["vocab_size"]})
 
         if embedding_type == "linear" and meta:

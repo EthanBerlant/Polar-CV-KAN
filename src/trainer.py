@@ -170,7 +170,7 @@ class BaseTrainer:
         n_batches = 0
 
         for batch in dataloader:
-            if self.use_amp:
+            if self.use_amp and self.scaler:
                 with torch.amp.autocast("cuda"):
                     metrics = self.validate_step(batch)
             else:
