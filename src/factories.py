@@ -6,7 +6,7 @@ from typing import Any
 from torch import nn
 from torch.utils.data import DataLoader
 
-from .configs.schema import ExperimentConfig, ModelConfig
+from .configs.model import ExperimentConfig, ModelConfig
 from .models.backbone import CVKANBackbone
 from .models.cv_kan import CVKAN, StandardClassificationHead, TokenClassificationHead
 from .models.cv_kan_image import ImageClassificationHead
@@ -41,7 +41,7 @@ class ModelFactory:
         backbone = CVKANBackbone(config.model)
 
         # Head
-        head = ModelFactory._create_head(config.model, meta, embedding.d_complex)
+        head = ModelFactory._create_head(config.model, meta, config.model.d_complex)
 
         # Assemble
         return CVKAN(embedding=embedding, backbone=backbone, head=head)
@@ -57,7 +57,12 @@ class ModelFactory:
             embedding_type = "token"
 
         # Allow config override
-        # if hasattr(config, "embedding_type"): ...
+        requested_patch_type = None
+        if getattr(config, "embedding_type", None):
+            embedding_type = config.embedding_type
+            if embedding_type == "conv":
+                requested_patch_type = "conv"
+                embedding_type = "image_patch"
 
         try:
             emb_cls = EMBEDDING_REGISTRY.get(embedding_type)
@@ -79,6 +84,8 @@ class ModelFactory:
                     "patch_size": 4,  # Config? or default
                 }
             )
+            if requested_patch_type:
+                kwargs["embedding_type"] = requested_patch_type
 
         if embedding_type == "token" and meta:
             kwargs.update({"vocab_size": meta["vocab_size"]})
@@ -92,12 +99,15 @@ class ModelFactory:
     def _create_head(config: ModelConfig, meta: dict | None, d_complex: int) -> nn.Module:
         n_classes = meta.get("n_classes", 10) if meta else 10
         task_type = meta.get("task_type", "classification") if meta else "classification"
+        kan_hidden = getattr(config, "kan_hidden", 32)
+        pooling = getattr(config, "pooling", "mean")
+        dropout = getattr(config, "dropout", 0.0)
 
         if task_type == "token_classification":
-            return TokenClassificationHead(d_complex, n_classes)
+            return TokenClassificationHead(d_complex, n_classes, kan_hidden, dropout)
         if task_type == "image_classification":
-            return ImageClassificationHead(d_complex, n_classes)
-        return StandardClassificationHead(d_complex, n_classes)
+            return ImageClassificationHead(d_complex, n_classes, kan_hidden, pooling, dropout)
+        return StandardClassificationHead(d_complex, n_classes, kan_hidden, pooling, dropout)
 
 
 class DataFactory:

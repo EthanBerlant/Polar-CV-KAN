@@ -1,6 +1,6 @@
 import pytest
 
-from src.configs.schema import ExperimentConfig
+from src.configs.model import ExperimentConfig
 from src.factories import ModelFactory
 from src.registry import DATASET_REGISTRY, Registry
 

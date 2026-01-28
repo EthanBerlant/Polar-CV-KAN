@@ -12,7 +12,7 @@ import yaml
 project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root))
 
-from src.configs.schema import ExperimentConfig  # noqa: E402
+from src.configs.model import ExperimentConfig  # noqa: E402
 from src.factories import DataFactory, ModelFactory  # noqa: E402
 from src.tracking import ExperimentTracker  # noqa: E402
 from src.trainer import BaseTrainer  # noqa: E402
