@@ -77,11 +77,12 @@ class ModelFactory:
         if embedding_type == "image_patch" and meta:
             img_size = meta.get("img_size", meta.get("image_size", 32))
             in_channels = meta.get("in_channels", 3)
+            patch_size = meta.get("patch_size", getattr(config, "patch_size", 4))
             kwargs.update(
                 {
                     "img_size": int(img_size) if img_size else 32,
                     "in_channels": in_channels,
-                    "patch_size": 4,  # Config? or default
+                    "patch_size": patch_size,
                 }
             )
             if requested_patch_type:
@@ -130,42 +131,27 @@ class DataFactory:
             loader_fn = DATASET_REGISTRY.get(ds_name)
             return loader_fn(config.data)
 
-        # Fallback to existing domain logic if not in registry?
-        # Or wrap existing logic into registry.
-        # Let's rely on 'src.data.factories' or similar.
-        # For now, let's look up specific domain modules based on name convention
-        domain_name = "image"  # default
-        if ds_name in ["cifar10", "mnist", "fashion_mnist"]:
-            domain_name = "image"
-        elif ds_name in ["imdb", "ag_news"]:
-            domain_name = "text"
+        # Fallback to explicit module mapping for legacy loaders.
+        legacy_image_loaders = {
+            "cifar10": "create_cifar10_dataloader",
+            "cifar100": "create_cifar100_dataloader",
+            "fashion_mnist": "create_fashionmnist_dataloader",
+        }
 
-        try:
-            if domain_name == "image":
-                from .data.domains import image as domain_module
-            elif domain_name == "text":
-                from .data.domains import text as domain_module
-            elif domain_name == "audio":
-                from .data.domains import audio as domain_module
-            else:
-                raise ValueError(f"Unknown domain for dataset {ds_name}")
+        if ds_name in legacy_image_loaders:
+            from .data import image_data as domain_module
 
-            # Adapt Config to what legacy modules expect
-            # Legacy expected a single Namespace or Dict with img_size, batch_size etc.
-            # It expects (model_config, train_config)
-            # We can pass our new config objects if they are compatible attributes
-            # Or convert to SimpleNamespaces
+            loader_name = legacy_image_loaders[ds_name]
+            loader_fn = getattr(domain_module, loader_name, None)
+            if loader_fn is None:
+                raise ValueError(f"Legacy loader '{loader_name}' missing for dataset '{ds_name}'.")
 
-            # Adapt Model Config
-            legacy_model_config = Namespace(**asdict(config.model))
-            if hasattr(config.data, "img_size"):
-                legacy_model_config.img_size = getattr(config.data, "img_size", 32)
-            else:
-                legacy_model_config.img_size = 32
+            return loader_fn(
+                root=config.data.data_dir,
+                batch_size=config.data.batch_size,
+                image_size=config.data.img_size,
+                num_workers=config.data.num_workers,
+                subset_size=config.data.subset_size,
+            )
 
-            legacy_train_config = Namespace(**asdict(config.data), **asdict(config.trainer))
-            return domain_module.create_dataloaders(legacy_model_config, legacy_train_config)
-        except ImportError as err:
-            raise ValueError(
-                f"Could not load data for dataset '{ds_name}' (domain: {domain_name})"
-            ) from err
+        raise ValueError(f"Unknown dataset '{ds_name}'. Register it in DATASET_REGISTRY.")
