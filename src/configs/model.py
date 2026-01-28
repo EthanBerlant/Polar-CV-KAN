@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 
@@ -9,10 +9,13 @@ class ModelConfig:
     d_complex: int = 64
     n_layers: int = 4
     kan_hidden: int = 32
+    embedding_type: str = "linear"
+    aggregation: str = "polar"
+    block_type: str = "polarizing"
     pooling: Literal["mean", "max", "attention"] = "mean"
     center_magnitudes: bool = True
     dropout: float = 0.0
-    input_type: Literal["real", "complex"] = "complex"
+    input_type: Literal["real", "complex"] = "real"
     normalization: Literal["none", "layer", "batch", "rms"] = "none"
 
 
@@ -21,7 +24,6 @@ class CVKANConfig(ModelConfig):
     """Configuration for standard CVKAN models."""
 
     head_approach: Literal["emergent", "offset", "factored"] = "emergent"
-    block_type: Literal["polarizing", "attention", "hierarchical"] = "polarizing"
     aggregation_type: Literal["mean", "causal", "window", "neighborhood", "magnitude_weighted"] = (
         "mean"
     )
@@ -36,7 +38,6 @@ class CVKANConfig(ModelConfig):
     hierarchical_split_idx: int = 2  # For hybrid sharing
     hierarchical_phase_shifting: bool = False  # For phase alignment
     hierarchical_interaction: str = "broadcast"  # broadcast or pointwise
-    aggregation_type: str = "magnitude_weighted"  # aggregation method
     mag_init_scale: float = 0.1
 
 
@@ -88,3 +89,48 @@ class NLPConfig(CVKANConfig):
     max_seq_len: int = 256
     d_model: int = 64  # Usually matches d_complex but can be distinct for embedding
     input_type: Literal["real", "complex"] = "real"
+
+
+@dataclass
+class DataConfig:
+    """Configuration for data loading."""
+
+    dataset_name: str = "cifar10"
+    data_dir: str = "./data"
+    batch_size: int = 32
+    num_workers: int = 4
+    subset_size: int | None = None
+
+    # Specifics
+    img_size: int = 32  # Default for CIFAR, easy to override
+    patch_size: int = 4  # Default for CIFAR
+    in_channels: int = 3
+
+
+@dataclass
+class TrainerConfig:
+    """Configuration for the training loop."""
+
+    output_dir: str = "./outputs"
+    epochs: int = 50
+    lr: float = 1e-3
+    weight_decay: float = 1e-4
+    patience: int = 10
+    metric_name: str = "accuracy"
+    metric_mode: str = "max"  # max or min
+    seed: int = 42
+    use_amp: bool = False
+    debug: bool = False
+
+    # Logging
+    project_name: str = "cvkan_project"
+    run_name: str | None = None
+
+
+@dataclass
+class ExperimentConfig:
+    """Root configuration object."""
+
+    model: ModelConfig = field(default_factory=ModelConfig)
+    data: DataConfig = field(default_factory=DataConfig)
+    trainer: TrainerConfig = field(default_factory=TrainerConfig)
